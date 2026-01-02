@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+imd_cache/
+debug_*.html
+debug_*.txt
+.env
+.generated/
+.gemini/

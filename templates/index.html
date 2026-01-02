@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TAF Generator</title>
+    <style>
+        :root {
+            --bg-color: #f4f6f9;
+            --card-bg: #ffffff;
+            --primary: #2c3e50;
+            --accent: #3498db;
+            --text: #333;
+            --error: #e74c3c;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 900px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            padding: 20px;
+        }
+
+        h1 {
+            margin-top: 0;
+            color: var(--primary);
+        }
+
+        h2 {
+            font-size: 1.2rem;
+            color: var(--accent);
+            margin-bottom: 10px;
+        }
+
+        label {
+            display: block;
+            margin-top: 10px;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            margin-top: 5px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        button {
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 20px;
+            font-size: 1rem;
+            width: 100%;
+        }
+
+        button:hover {
+            background-color: #2980b9;
+        }
+
+        .taf-box {
+            background: #2d3436;
+            color: #dfe6e9;
+            font-family: 'Consolas', 'Monaco', monospace;
+            padding: 15px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            margin-top: 5px;
+        }
+
+        .error-box {
+            background-color: #fdecea;
+            border-left: 4px solid var(--error);
+            padding: 15px;
+            color: var(--error);
+        }
+
+        .debug-section {
+            background: #eee;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .raw-data {
+            font-size: 0.8rem;
+            color: #7f8c8d;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <div class="card">
+            <h1>TAF Generator Tool</h1>
+            <p>Enter your session details to generate 30h Long and 9h Short TAFs.</p>
+
+            <form action="/generate" method="POST">
+                <label for="imd_cookie">IMD PHPSESSID (Cookie Value)</label>
+                <input type="text" id="imd_cookie" name="imd_cookie" value="{{ last_cookie or '' }}"
+                    placeholder="Paste cookie here (e.g. kqrgn9gv43jq...)">
+
+                <label for="station">Station Code</label>
+                <input type="text" id="station" name="station" value="{{ last_station or 'VABB' }}"
+                    placeholder="e.g. VABB">
+
+                <button type="submit">Generate TAF</button>
+            </form>
+        </div>
+
+        {% if error %}
+        <div class="card error-box">
+            <h3>Error Encountered</h3>
+            <p>{{ error }}</p>
+        </div>
+        {% endif %}
+
+        {% if long_taf %}
+        <div class="card">
+            <h2>Long TAF (30 HR)</h2>
+            <div class="taf-box">{{ long_taf }}</div>
+
+            <h2>Short TAF (9 HR)</h2>
+            <div class="taf-box">{{ short_taf }}</div>
+
+            <div class="raw-data">
+                <strong>IMD Data used:</strong> {{ imd_raw }}<br>
+                <strong>Ogimet Data used:</strong> {{ ogimet_raw }}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if debug_forms %}
+        <div class="card">
+            <h2>🛠 Debug Info: Forms Found</h2>
+            <p>The scraper couldn't find the data table, but found these form forms. Copy this info to fix the scraper.
+            </p>
+            <div class="debug-section">
+                <pre>{{ debug_forms | tojson(indent=2) }}</pre>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+</body>
+
+</html>
