@@ -122,12 +122,9 @@
     <div class="container">
         <div class="card">
             <h1>TAF Generator Tool</h1>
-            <p>Enter your session details to generate 30h Long and 9h Short TAFs.</p>
 
             <form action="/generate" method="POST">
-                <label for="imd_cookie">IMD PHPSESSID (Cookie Value)</label>
-                <input type="text" id="imd_cookie" name="imd_cookie" value="{{ last_cookie or '' }}"
-                    placeholder="Paste cookie here (e.g. kqrgn9gv43jq...)">
+
 
                 <label for="station">Station Code</label>
                 <input type="text" id="station" name="station" value="{{ last_station or 'VABB' }}"
@@ -152,10 +149,7 @@
             <h2>Short TAF (9 HR)</h2>
             <div class="taf-box">{{ short_taf }}</div>
 
-            <div class="raw-data">
-                <strong>IMD Data used:</strong> {{ imd_raw }}<br>
-                <strong>Ogimet Data used:</strong> {{ ogimet_raw }}
-            </div>
+
         </div>
         {% endif %}
 

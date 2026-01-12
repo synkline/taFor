@@ -12,11 +12,10 @@ def index():
 
 @app.route('/generate', methods=['POST'])
 def generate():
-    imd_cookie = request.form.get('imd_cookie')
     station = request.form.get('station', 'VABB').upper()
     
     # Initialize Scrapers
-    imd_scraper = IMDScraper(session_cookie=imd_cookie)
+    imd_scraper = IMDScraper()
     ogimet_scraper = OgimetScraper()
     generator = TafGenerator()
 
@@ -58,10 +57,8 @@ def generate():
                          short_taf=short_taf, 
                          error=error_msg, 
                          debug_forms=debug_forms,
-                         last_cookie=imd_cookie,
-                         last_station=station,
-                         imd_raw=imd_data if "error" not in imd_data else None,
-                         ogimet_raw=ogimet_data if "error" not in ogimet_data else None)
+                         last_station=station)
+
 
 if __name__ == '__main__':
     # Run slightly verbose for dev

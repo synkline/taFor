@@ -33,14 +33,14 @@ def main():
     if "error" in imd_data:
         print(f"Error reading IMD Data: {imd_data['error']}")
         sys.exit(1)
-    print(f"IMD Data: {imd_data}")
+    # print(f"IMD Data: {imd_data}")
 
     # 2. Ogimet
     ogimet_data = ogimet_scraper.fetch_data(station)
     if "error" in ogimet_data:
         print(f"Error fetching Ogimet Data: {ogimet_data['error']}")
         sys.exit(1)
-    print(f"Ogimet Data: {ogimet_data}")
+    # print(f"Ogimet Data: {ogimet_data}")
 
     # Generate TAFs
     print("\n--- Generated TAFs ---")

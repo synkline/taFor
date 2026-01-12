@@ -146,7 +146,7 @@ class IMDScraper:
         """
         Fetches data. Tries online download first, then falls back to local cache.
         """
-        station = station_code.upper() if station_code else "VIDP"
+        station = station_code.upper() if station_code else "VABB"
         
         # 1. Try to download latest data
         download_result = self.download_data(station)
@@ -242,17 +242,56 @@ class IMDScraper:
         
         return {"error": f"Station '{station}' not found in any MWO region pages."}
 
+    def _save_with_versioning(self, content, station):
+        """
+        Parses content for 'BASED ON' timestamp and saves a copy.
+        """
+        try:
+            # Decode if bytes
+            text = content.decode('utf-8', errors='ignore') if isinstance(content, bytes) else content
+            
+            # Search for pattern: BASED ON 06 UTC of 20260108
+            # Regex needs to be flexible for spaces
+            import re
+            match = re.search(r'BASED\s+ON\s+(\d+)\s+UTC\s+of\s+(\d+)', text, re.IGNORECASE)
+            
+            if match:
+                hour = match.group(1).zfill(2) # e.g. 06
+                date_str = match.group(2)      # e.g. 20260108
+                
+                # Construct Filename: STATION_YYYYMMDD_HHUTC.txt
+                versioned_filename = f"{station.upper()}_{date_str}_{hour}UTC.txt"
+                versioned_path = f"d:/taFor/imd_cache/{versioned_filename}"
+                
+                import os
+                if not os.path.exists(versioned_path):
+                    with open(versioned_path, "wb") as f:
+                         f.write(content if isinstance(content, bytes) else content.encode('utf-8'))
+                    print(f"[IMD] Versioned copy saved: {versioned_filename}")
+                else:
+                    print(f"[IMD] Versioned copy already exists: {versioned_filename}")
+            else:
+                print("[IMD] Could not find 'BASED ON' timestamp for versioning.")
+                return None
+                
+            return versioned_path
+        except Exception as e:
+            print(f"[IMD] Failed to save versioned copy: {e}")
+            return None
+
     def _download_url_to_file(self, url, station):
         try:
             print(f"[IMD] Downloading from {url}...")
             response = self.session.get(url, timeout=15)
             response.raise_for_status()
             
-            file_path = f"d:/taFor/imd_cache/{station}.txt"
-            with open(file_path, "wb") as f:
-                f.write(response.content)
-            print(f"[IMD] Saved to {file_path}")
-            return {"success": True, "path": file_path}
+            # Save Versioned Copy ONLY
+            saved_path = self._save_with_versioning(response.content, station)
+            
+            if saved_path:
+                return {"success": True, "path": saved_path}
+            else:
+                return {"error": "Could not determine timestamp from file content."}
         except Exception as e:
             return {"error": f"Download failed: {e}"}
 
@@ -265,32 +304,53 @@ class IMDScraper:
             response = self.session.post(url, data=payload, headers=headers, timeout=15)
             response.raise_for_status()
             
-            # Save the HTML/Text response
-            file_path = f"d:/taFor/imd_cache/{station}.txt"
-            with open(file_path, "wb") as f:
-                f.write(response.content)
-            print(f"[IMD] Saved POST response to {file_path}")
-            return {"success": True, "path": file_path}
+            # Save Versioned Copy ONLY
+            saved_path = self._save_with_versioning(response.content, station)
+            
+            if saved_path:
+                 return {"success": True, "path": saved_path}
+            else:
+                 return {"error": "Could not determine timestamp to save file."}
         except Exception as e:
             return {"error": f"Form submission failed: {e}"}
 
     def read_from_cache(self, station_code):
+        import glob
+        import os
+        
+        station = station_code.upper()
+        cache_dir = "d:/taFor/imd_cache"
+        
+        # Pattern: STATION_YYYYMMDD_HHUTC.txt
+        pattern = os.path.join(cache_dir, f"{station}_*UTC.txt")
+        files = glob.glob(pattern)
+        
+        target_file = None
+        if not files:
+             # Fallback to old simple name if versioned doesn't exist?
+             simple_path = os.path.join(cache_dir, f"{station}.txt")
+             if os.path.exists(simple_path):
+                 target_file = simple_path
+             else:
+                 return {"error": f"No cached data found for {station}."}
+        else:
+             # Sort by filename (YYYYMMDD ensure correct sort) descending
+             files.sort(reverse=True)
+             target_file = files[0]
+             
         try:
-            file_path = f"d:/taFor/imd_cache/{station_code.upper()}.txt"
-            import os
-            if not os.path.exists(file_path):
-                return {"error": f"No local cache found for {station_code}. Download first."}
-            
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            print(f"[IMD] Reading from cache: {os.path.basename(target_file)}")
+            with open(target_file, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
-                
+
             # Determine if it's HTML or Text
             if "<html>" in content.lower() or "<table" in content.lower():
                  soup = BeautifulSoup(content, 'lxml')
                  return self._parse_data_table(soup)
             else:
+                 # Pass content as string, let parser handle splitting if needed, 
+                 # BUT wait, the existing parser logic (lines 343+) takes 'text' string and splits it.
                  return self._parse_text_response(content)
-                 
         except Exception as e:
             return {"error": f"Failed to read cache: {e}"}
 
@@ -474,7 +534,7 @@ class IMDScraper:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("station", nargs="?", default="VIDP", help="Station code (e.g., VIDP, VABB)")
+    parser.add_argument("station", nargs="?", default="VABB", help="Station code (e.g., VIDP, VABB)")
     parser.add_argument("--cookie", help="PHPSESSID cookie")
     args = parser.parse_args()
     
