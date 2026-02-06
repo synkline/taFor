@@ -2,6 +2,8 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import datetime
+import time
+import random
 
 class OgimetScraper:
     def __init__(self):
@@ -141,6 +143,24 @@ class IMDScraper:
             self.session.cookies.set("PHPSESSID", session_cookie)
         
         self.url = "https://nwp.imd.gov.in/gfs_taf.php"
+
+    def _get_with_retry(self, url, timeout=10, retries=3):
+        """
+        Executes a GET request with exponential backoff retry logic.
+        """
+        for i in range(retries):
+            try:
+                response = self.session.get(url, timeout=timeout)
+                return response
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if i < retries - 1:
+                    sleep_time = (2 ** i) + random.uniform(0, 1)
+                    print(f"[IMD] Connection error ({e}). Retrying in {sleep_time:.2f}s...")
+                    time.sleep(sleep_time)
+                else:
+                    print(f"[IMD] Max retries reached for {url}.")
+                    raise e
+        return None
         
     def fetch_data(self, station_code=None):
         """
@@ -190,8 +210,8 @@ class IMDScraper:
             print(f"[IMD] checking page: {current_page}")
             
             try:
-                response = self.session.get(full_url, timeout=10)
-                if "login" in response.url:
+                response = self._get_with_retry(full_url, timeout=10)
+                if response and "login" in response.url:
                      return {"error": "Authentication Failed. Please check PHPSESSID."}
             except Exception as e:
                 print(f"[IMD] Failed to load {current_page}: {e}")
@@ -261,13 +281,21 @@ class IMDScraper:
                 
                 # Construct Filename: STATION_YYYYMMDD_HHUTC.txt
                 versioned_filename = f"{station.upper()}_{date_str}_{hour}UTC.txt"
-                versioned_path = f"d:/taFor/imd_cache/{versioned_filename}"
+                
+                # UPDATE: User Request - Subdirectory per station
+                # d:/taFor/imd_cache/VABB/VABB_...txt
+                station_dir = f"d:/taFor/imd_cache/{station.upper()}"
                 
                 import os
+                if not os.path.exists(station_dir):
+                    os.makedirs(station_dir)
+                    
+                versioned_path = os.path.join(station_dir, versioned_filename)
+                
                 if not os.path.exists(versioned_path):
                     with open(versioned_path, "wb") as f:
                          f.write(content if isinstance(content, bytes) else content.encode('utf-8'))
-                    print(f"[IMD] Versioned copy saved: {versioned_filename}")
+                    print(f"[IMD] Versioned copy saved: {versioned_path}")
                 else:
                     print(f"[IMD] Versioned copy already exists: {versioned_filename}")
             else:
@@ -282,7 +310,7 @@ class IMDScraper:
     def _download_url_to_file(self, url, station):
         try:
             print(f"[IMD] Downloading from {url}...")
-            response = self.session.get(url, timeout=15)
+            response = self._get_with_retry(url, timeout=15)
             response.raise_for_status()
             
             # Save Versioned Copy ONLY
@@ -319,7 +347,8 @@ class IMDScraper:
         import os
         
         station = station_code.upper()
-        cache_dir = "d:/taFor/imd_cache"
+        # UPDATE: Read from Station Subdirectory
+        cache_dir = f"d:/taFor/imd_cache/{station}"
         
         # Pattern: STATION_YYYYMMDD_HHUTC.txt
         pattern = os.path.join(cache_dir, f"{station}_*UTC.txt")
@@ -327,16 +356,18 @@ class IMDScraper:
         
         target_file = None
         if not files:
-             # Fallback to old simple name if versioned doesn't exist?
-             simple_path = os.path.join(cache_dir, f"{station}.txt")
-             if os.path.exists(simple_path):
-                 target_file = simple_path
-             else:
+             # Fallback check root just in case (Legacy support?)
+             # Or just fail since we are migrating structure.
+             # Let's check root for legacy immediate compatibility just in case
+             fallback_pattern = f"d:/taFor/imd_cache/{station}_*UTC.txt"
+             files = glob.glob(fallback_pattern)
+             
+             if not files:
                  return {"error": f"No cached data found for {station}."}
-        else:
-             # Sort by filename (YYYYMMDD ensure correct sort) descending
-             files.sort(reverse=True)
-             target_file = files[0]
+        
+        # Sort by filename (YYYYMMDD ensure correct sort) descending
+        files.sort(reverse=True)
+        target_file = files[0]
              
         try:
             print(f"[IMD] Reading from cache: {os.path.basename(target_file)}")

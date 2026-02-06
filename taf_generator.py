@@ -4,12 +4,14 @@ class TafGenerator:
     def __init__(self):
         pass
 
-    def _get_standard_issue_time(self):
+    def _get_standard_issue_time(self, now=None):
         """
         Returns the closest standard TAF issue time (05, 11, 17, 23 UTC)
         and the corresponding issue datetime object.
         """
-        now = datetime.datetime.utcnow()
+        if now is None:
+            now = datetime.datetime.utcnow()
+
         candidates = [5, 11, 17, 23]
         
         # Find closest hour
@@ -27,7 +29,11 @@ class TafGenerator:
         if 2 <= current_hour < 8: best_hour = 5
         elif 8 <= current_hour < 14: best_hour = 11
         elif 14 <= current_hour < 20: best_hour = 17
-        else: best_hour = 23
+        else: 
+            best_hour = 23
+            # If we are in the early hours (0, 1) of Day X, the 2300 slot belongs to Day X-1
+            if current_hour < 2:
+                now = now - datetime.timedelta(days=1)
         
         issue_dt = now.replace(hour=best_hour, minute=0, second=0, microsecond=0)
         return issue_dt.strftime("%d%H%M") + "Z", issue_dt
@@ -42,7 +48,7 @@ class TafGenerator:
         except (ValueError, TypeError):
             return "000"
 
-    def _format_wind(self, d_str, s_str, g_str="0"):
+    def _format_wind(self, d_str, s_str, g_str="0", is_vrb=None):
         """
         Standard Wind Formatting (Main TAF & BECMG).
         Logic (User Defined previously):
@@ -51,6 +57,9 @@ class TafGenerator:
              Format: D(Avg)G(Gust)KT
         Else:
              Format: D(Speed)KT
+             
+        VRB Rule:
+        Only if is_vrb is True (Speed <= 3 for T and T+1) -> VRB
         """
         try:
             d = float(d_str or 0)
@@ -58,13 +67,28 @@ class TafGenerator:
             g = float(g_str or 0)
             
             d_val = int(round(d / 10.0) * 10)
+            
+            # User Request: If Wdeg < 10 (and > 0), round to 10
+            if 0 < d < 10:
+                d_val = 10
+            
             if d_val == 0: d_val = 360 
             if d_val == 360 and s == 0: d_val = 0 
             
             d_fmt = f"{d_val:03d}"
             
+            if s == 0:
+                return "00000KT"
+            
             if s <= 3:
-                return f"VRB{int(s):02d}KT"
+                # Use strict VRB flag if provided
+                if is_vrb is True:
+                     return f"VRB{int(s):02d}KT"
+                elif is_vrb is False:
+                     pass # Fall through to Directional
+                else:
+                     # Legacy fallback
+                     return f"VRB{int(s):02d}KT"
             
             # Gust Logic: Avg = Gust - 10
             if s >= 15 or g >= 17:
@@ -108,140 +132,199 @@ class TafGenerator:
             return matches[0] # Return first layer height
         return None
 
-    def _get_projected_conditions(self, entry, forecast_dt=None, history=None):
+    def _get_projected_conditions(self, entry, forecast_dt=None, history=None, rain_3hr_sum=None):
         """
         Estimates Vis, Weather, Clouds based on IMD Forecast Data.
-        Rules (User Image 1767376200044 & New User Instruction):
-        - Rain (3hrly accm):
-          - 0-15mm: -RA
-          - 15-65mm: RA
-          - 65-115mm: +RA
-        - Weather (Wx):
-           - Stick to RH rules (FU <= 60, HZ <= 75, BR > 75)
-        - Visibility:
-           - Prioritize Persistence: Look for METAR -24hrs.
-           - Fallback: Use RH-based estimation if history missing.
-        - Clouds:
-           - Persistence if LCB/CCB > 0.
+        rain_3hr_sum: Optional pre-calculated centered 3hr sum. If None, uses entry['Rain'].
         """
-        # Defaults for Fallback (RH Based)
-        calc_vis = "5000" 
+        # Defaults
+        final_vis = "9999"
         wx = []
-        clouds = [] 
+        cloud_str = "NSC"
         
         try:
-            rh = float(entry.get('RH', '0'))
+            # We still use rain for Wx Codes (-RA/RA/+RA) but NOT for visibility
             rain = float(entry.get('Rain', '0'))
-            ws = float(entry.get('WS', '0'))
+            eval_rain = rain_3hr_sum if rain_3hr_sum is not None else rain
+            
             lcb = float(entry.get('LCB', '0'))
             ccb = float(entry.get('CCB', '0'))
             
-            # --- Weather Codes (Strictly RH/Rain) ---
-            if rain > 0:
-                # Rain Logic
-                if rain > 10: 
-                    calc_vis = "1000"
+            # --- Weather Codes (Rain Only) ---
+            if eval_rain >= 1:
+                # User Rules (Applied to Sum) for INTENSITY only
+                if eval_rain >= 65: 
                     wx.append("+RA")
-                elif rain > 2.5:
-                    calc_vis = "3000"
+                elif eval_rain >= 15:
                     wx.append("RA")
                 else: 
-                    # 0-2.5mm
-                    calc_vis = "4000"
                     wx.append("-RA")
-            elif rain == 0:
-                # No Rain - Strict RH Rules for Wx Code
-                if rh <= 60:
-                    calc_vis = "4000" 
-                    wx.append("FU")
-                elif rh <= 75:
-                    calc_vis = "4000" 
-                    wx.append("HZ")
-                else:
-                    if rh >= 95:
-                        calc_vis = "0800"
-                        wx.append("FG")
-                    else:
-                        calc_vis = "2000"
+            else:
+                # No Rain -> Check RH-based Weather
+                # Weather = FU , If RH <= 60% & Rainfall = 0
+                # Weather = HZ, if 60% < RH <=75% & Rainfall = 0
+                # Weather = BR, if RH > 75% & Rainfall = 0
+                try:
+                    rh = float(entry.get('RH', '0'))
+                    if rh <= 60:
+                        wx.append("FU")
+                    elif 60 < rh <= 75:
+                        wx.append("HZ")
+                    elif rh > 75:
                         wx.append("BR")
+                except:
+                    pass
+            
+            # Note: Removed RH-based Fog/Mist/Haze logic as per instruction to remove IMD-calc visibility.
                     
             # --- Visibility Determination ---
-            # Priority 1: Persistence (Same time yesterday)
-            final_vis = calc_vis # Start with fallback
+            # Priority: Exact Time -> Persistence (24h) -> Persistence (48h) -> Fallback (9999)
             
             if forecast_dt and history:
-                target_hist = forecast_dt - datetime.timedelta(hours=24)
-                hist_metar = self._find_matching_metar(target_hist, history)
+                vis_found = False
                 
-                if hist_metar:
-                    v_hist = hist_metar.get('visibility_raw')
-                    if v_hist and v_hist != 'N/A' and v_hist != '9999': 
-                         final_vis = v_hist
-            
+                # 1. Exact Time Match
+                hist_metar_exact = self._find_matching_metar(forecast_dt, history)
+                if hist_metar_exact:
+                    v_hist = hist_metar_exact.get('visibility_raw')
+                    if v_hist and v_hist != 'N/A':
+                        final_vis = v_hist
+                        vis_found = True
+                
+                # 2. Try 24h Lookback
+                if not vis_found:
+                    target_hist_24 = forecast_dt - datetime.timedelta(hours=24)
+                    hist_metar_24 = self._find_matching_metar(target_hist_24, history)
+                    if hist_metar_24:
+                        v_hist = hist_metar_24.get('visibility_raw')
+                        if v_hist and v_hist != 'N/A': 
+                             final_vis = v_hist
+                             vis_found = True
+                
+                # 3. Try 48h Lookback if 24h failed
+                if not vis_found:
+                    target_hist_48 = forecast_dt - datetime.timedelta(hours=48)
+                    hist_metar_48 = self._find_matching_metar(target_hist_48, history)
+                    if hist_metar_48:
+                        v_hist = hist_metar_48.get('visibility_raw')
+                        if v_hist and v_hist != 'N/A':
+                             final_vis = v_hist
+
             # --- Clouds ---
             if lcb == 0 and ccb == 0:
                 cloud_str = "NSC"
             else:
-                # Cloud Persistence Logic
+                # LCB or CCB is non-zero -> Check Persistence
                 persisted_clouds = None
-                if forecast_dt and history:
-                    target_hist = forecast_dt - datetime.timedelta(hours=24)
-                    hist_metar = self._find_matching_metar(target_hist, history)
-                    if hist_metar:
-                        persisted_clouds = hist_metar.get('clouds_raw')
                 
-                if persisted_clouds and persisted_clouds != 'N/A' and persisted_clouds != 'NSC':
+                if forecast_dt and history:
+                    # 1. Exact Time Match
+                    hist_metar_exact = self._find_matching_metar(forecast_dt, history)
+                    if hist_metar_exact:
+                        c_raw = hist_metar_exact.get('clouds_raw')
+                        if c_raw and c_raw != 'N/A': # Allow NSC here if it's explicit
+                            persisted_clouds = c_raw
+
+                    # 2. Try 24h Lookback
+                    if not persisted_clouds:
+                        target_hist_24 = forecast_dt - datetime.timedelta(hours=24)
+                        hist_metar_24 = self._find_matching_metar(target_hist_24, history)
+                        if hist_metar_24:
+                            c_raw = hist_metar_24.get('clouds_raw')
+                            if c_raw and c_raw != 'N/A' and c_raw != 'NSC':
+                                persisted_clouds = c_raw
+                    
+                    # 3. Try 48h Lookback if 24h failed
+                    if not persisted_clouds:
+                        target_hist_48 = forecast_dt - datetime.timedelta(hours=48)
+                        hist_metar_48 = self._find_matching_metar(target_hist_48, history)
+                        if hist_metar_48:
+                            c_raw = hist_metar_48.get('clouds_raw')
+                            if c_raw and c_raw != 'N/A' and c_raw != 'NSC':
+                                persisted_clouds = c_raw
+                
+                if persisted_clouds:
                     cloud_str = persisted_clouds
                 else:
-                    # Fallback mapping
-                    c_list = []
-                    if lcb > 0:
-                        amt = "FEW" if lcb <= 2 else "SCT" if lcb <= 4 else "BKN" if lcb <= 7 else "OVC"
-                        c_list.append(f"{amt}020")
-                    if ccb > 0:
-                        amt = "FEW" if ccb <= 2 else "SCT" if ccb <= 4 else "BKN" if ccb <= 7 else "OVC"
-                        c_list.append(f"{amt}100")
-                        
-                    cloud_str = " ".join(c_list) if c_list else "NSC"
+                    # Fallback if non-zero clouds but no history? 
+                    # User instruction: "pick cloud from previous day". 
+                    # If unavailable, we default to NSC to avoid inventing data.
+                    cloud_str = "NSC"
             
             wx_str = " ".join(wx)
             return final_vis, wx_str.strip(), cloud_str
             
         except Exception:
-            return "5000", "HZ", "NSC"
+            return "9999", "", "NSC"
 
     def _normalize_visibility(self, val_str):
         try:
            val = int(val_str)
-           if val >= 5000: return "5000"
+           if val >= 9999: return "9999"
+           
            if val < 800: return f"{int(round(val/50)*50):04d}"
+           
+           # Standard 100m steps for 800 - 4999
            if val < 5000:
-               if val >= 1500:
-                   return f"{int(round(val/500)*500):04d}" 
                return f"{int(round(val/100)*100):04d}"
+               
+           # For 5000-9000, usually standard is 1000 steps, or just report 9999 if >10km
+           # We will fallback to 9999 for anything >= 5000 to match previous "bucket" logic style 
+           # but using the standard "clear" code instead of 5000.
            return "9999"
         except:
            return "9999"
 
+    def _snap_visibility(self, vis):
+        """
+        Snaps visibility based on user rules:
+        - If > 1500m: Nearest 500m
+        - If <= 1500m: Nearest 100m
+        """
+        try:
+            v = int(vis)
+            if v == 9999: return "9999" # Keep 9999 as is
+            
+            if v > 1500:
+                # Nearest 500
+                remainder = v % 500
+                if remainder >= 250:
+                    v = v + (500 - remainder)
+                else:
+                    v = v - remainder
+            else:
+                # Nearest 100
+                remainder = v % 100
+                if remainder >= 50:
+                    v = v + (100 - remainder)
+                else:
+                    v = v - remainder
+            
+            # Formatting: 4 digits
+            return f"{v:04d}"
+        except:
+            return "9999"
+
     def _check_vis_limit_change(self, old_vis, new_vis):
         """
-        Checks if visibility change crosses specific thresholds:
-        800, 1500, 2000, 3000, 5000 meters.
+        Checks if visibility change is >= 30% deviation.
+        Returns True if change triggers.
         """
-        thresholds = [800, 1500, 2000, 3000, 5000]
         try:
-            v1 = int(old_vis)
-            v2 = int(new_vis)
+            v1 = float(old_vis)
+            v2 = float(new_vis)
             
-            for t in thresholds:
-                # Check crossing: one is below, other is >=
-                # v1 < t <= v2  (Improving: Old below strict, New at/above)
-                # v2 <= t < v1  (Deteriorating: New at/below, Old above strict)
-                if (v1 < t <= v2) or (v2 <= t < v1):
-                    return True
-        except (ValueError, TypeError):
+            if v1 == 0: return v2 > 0 # Handle zero division
+            
+            # Delta %
+            delta = abs(v2 - v1) / v1
+            
+            # Threshold 30%
+            if delta >= 0.30:
+                return True
             return False
-        return False
+        except:
+            return False
 
     def _find_matching_metar(self, target_dt, history):
         """
@@ -304,26 +387,27 @@ class TafGenerator:
             entry = data_map.get(curr_dt)
             
             if entry:
-                # Process Conditions
-                # Vis/Wx/Clouds
-                p_vis, p_wx, p_clouds = self._get_projected_conditions(entry, curr_dt, history)
+                # Calculate Centered 3-Hour Rain Sum: Rain(T-1) + Rain(T) + Rain(T+1)
+                # This smooths the intensity and matches user thresholds (15/65).
+                rain_t = float(entry.get('Rain', '0'))
                 
-                # Check Actual METAR override
-                actual_metar = self._find_matching_metar(curr_dt, history)
-                if actual_metar:
-                     v = actual_metar.get('visibility_raw')
-                     c = actual_metar.get('clouds_raw')
-                     if v and v != 'N/A': p_vis = v
-                     if c and c != 'N/A': p_clouds = c
-                else:
-                    # Persistence 24h
-                    past_dt = curr_dt - datetime.timedelta(days=1)
-                    past_metar = self._find_matching_metar(past_dt, history)
-                    if past_metar:
-                         v = past_metar.get('visibility_raw')
-                         c = past_metar.get('clouds_raw')
-                         if v and v != 'N/A': p_vis = v
-                         if c and c != 'N/A': p_clouds = c
+                prev_dt = curr_dt - datetime.timedelta(hours=1)
+                next_dt = curr_dt + datetime.timedelta(hours=1)
+                
+                # Fetch neighbors safely (default 0 if missing/out of bounds)
+                rain_prev = float(data_map.get(prev_dt, {}).get('Rain', '0'))
+                rain_next = float(data_map.get(next_dt, {}).get('Rain', '0'))
+                
+                rain_3hr = rain_prev + rain_t + rain_next
+                
+                # Process Conditions using 3hr Sum for thresholds
+                p_vis, p_wx, p_clouds = self._get_projected_conditions(entry, curr_dt, history, rain_3hr_sum=rain_3hr)
+                
+                # Logic moved to _get_projected_conditions:
+                # - Exact Match
+                # - 24h Persistence
+                # - 48h Persistence
+                # - Defaults
 
                 p_vis = self._normalize_visibility(p_vis)
                 
@@ -336,6 +420,22 @@ class TafGenerator:
                 wgust = float(g_str or 0)
                 wdir = float(d_str or 0)
                 
+                # VRB Check: Speed(t) <= 3 AND Speed(t+1) <= 3
+                # We need next hour's speed.
+                
+                # Default assume false if end of data
+                is_vrb_condition = False
+                
+                # Check current speed
+                if wspd <= 3:
+                    # Check next speed
+                    # We already have next_dt from rain calc
+                    next_entry = data_map.get(next_dt)
+                    if next_entry:
+                        s_next = float(next_entry.get('WS', '0'))
+                        if s_next <= 3:
+                            is_vrb_condition = True
+                
                 state = {
                     'dt': curr_dt,
                     'wdir': wdir,
@@ -344,8 +444,13 @@ class TafGenerator:
                     'vis': p_vis,
                     'wx': p_wx,
                     'clouds': p_clouds,
+                    'is_vrb': is_vrb_condition,
+                    'rain_3hr': rain_3hr,
                     'raw_entry': entry
                 }
+                # DEBUG PRINT
+                # if curr_dt.hour == 13 and curr_dt.day == 11:
+                #     print(f"DEBUG: {curr_dt} Row={entry.get('Time')} WSPD={wspd} WGUST={wgust} Raw={entry}")
                 timeline.append(state)
             
             curr_dt += datetime.timedelta(hours=1)
@@ -384,19 +489,20 @@ class TafGenerator:
                 block_start_idx = i
                 block_end_idx = j # Exclusive
                 
-                # 2. Iterate through this block and split into max 4h chunks
+                # 2. Iterate through this block and split into max 4h chunks (Strict Rule 4h)
                 curr_idx = block_start_idx
                 while curr_idx < block_end_idx:
                     chunk_end_idx = min(curr_idx + 4, block_end_idx)
                     
-                    # Analyze Chunk
+                    # Analyze Chunk - Find MAX SPEED to drive the calculation
                     chunk_max_ws = 0
                     for k in range(curr_idx, chunk_end_idx):
                         if timeline[k]['wspd'] > chunk_max_ws: chunk_max_ws = timeline[k]['wspd']
                     
-                    # Calculate Gust per User Rule (TEMPO specific): Gust = Wspd + 10
-                    # We use chunk_max_ws as the representative Speed
-                    chunk_gust = chunk_max_ws + 10
+                    # Calculate per User Rule: Gust = Speed + 10
+                    # "If wgust >= 17 ... Read wspd ... wgust = wspd+10"
+                    reported_spd = chunk_max_ws
+                    reported_gust = reported_spd + 10
                     
                     # Define Time Range
                     s_dt = timeline[curr_idx]['dt']
@@ -413,16 +519,13 @@ class TafGenerator:
                     s_str = f"{s_dt.day:02d}{s_dt.hour:02d}"
                     e_str = f"{e_dt.day:02d}{e_dt.hour:02d}"
                     
-                    # Use Direction from Start of Chunk
+                    # Use Direction from Start of Chunk (or maybe avg?)
                     d_val = timeline[curr_idx]['wdir'] 
                     d_fmt = self._round_to_nearest_10(d_val)
-                    if d_fmt == "000" and chunk_max_ws > 0: d_fmt = "360"
+                    if d_fmt == "000" and reported_spd > 0: d_fmt = "360"
                     
-                    # Format String: D(S)G(S+10)KT
-                    # Ensure S is at least what was observed? Yes.
-                    # Ensure G is exactly S+10. 
-                    
-                    wind_str = f"{d_fmt}{int(chunk_max_ws):02d}G{int(chunk_gust):02d}KT"
+                    # Format String: D(Speed)G(Speed+10)KT
+                    wind_str = f"{d_fmt}{int(reported_spd):02d}G{int(reported_gust):02d}KT"
                     
                     tempo_str = f"TEMPO {s_str}/{e_str} {wind_str}"
                     groups.append(tempo_str)
@@ -434,10 +537,72 @@ class TafGenerator:
                 i = block_end_idx 
             else:
                 i += 1
+        
+        # --- RAIN TEMPO LOGIC (Separate Pass) ---
+        # Rule: If rain > 50mm, Add "TEMPO HH/HH 1500 +RA +SHRA" (6hr validity)
+        # --- RAIN TEMPO LOGIC (Separate Pass) ---
+        # Rule: If rain > 50mm, Add "TEMPO HH/HH ... " (6hr validity)
+        # We process this similarly to Wind, detecting continuous blocks > 50mm.
+        i = 0
+        while i < len(timeline):
+            state = timeline[i]
+            # Use 3-hourly accumulated rain from state
+            rain_val = state.get('rain_3hr', 0.0)
+            
+            if rain_val > 50:
+                # 1. Identify valid block
+                j = i + 1
+                while j < len(timeline):
+                    next_r = timeline[j].get('rain_3hr', 0.0)
+                    if next_r <= 50:
+                        break
+                    j += 1
                 
+                block_start = i
+                block_end = j
+                
+                # 2. Process block in 6h chunks
+                curr = block_start
+                while curr < block_end:
+                    chunk_end = min(curr + 6, block_end)
+                    
+                    s_dt = timeline[curr]['dt']
+                    e_dt_validity = timeline[chunk_end - 1]['dt'] + datetime.timedelta(hours=1)
+                    
+                    s_str = f"{s_dt.day:02d}{s_dt.hour:02d}"
+                    e_str = f"{e_dt_validity.day:02d}{e_dt_validity.hour:02d}"
+                    
+                    # Determine conditions for the TEMPO
+                    # User request: "TEMPO to/from vis +RA +SHRA"
+                    # We need 'vis'. Let's pick the minimum visibility in this chunk.
+                    min_vis_val = 9999
+                    min_vis_str = "9999"
+                    
+                    for k in range(curr, chunk_end):
+                        v_str = timeline[k]['vis']
+                        try:
+                            v_int = int(v_str)
+                            if v_int < min_vis_val:
+                                min_vis_val = v_int
+                                min_vis_str = v_str
+                        except:
+                            pass
+                            
+                    # Format
+                    tempo_str = f"TEMPO {s_str}/{e_str} {min_vis_str} +RA +SHRA"
+                    groups.append(tempo_str)
+                    
+                    curr = chunk_end
+                
+                # Advance main loop
+                i = block_end
+            else:
+                i += 1
+
+
         return groups, masked_times
 
-    def _generate_change_groups(self, timeline, init_vis, init_clouds, init_wind_obj, masked_times=None):
+    def _generate_change_groups(self, timeline, init_vis, init_clouds, init_wx, init_wind_obj, masked_times=None):
         """
         Generates BECMG groups with smoothing (Debouncing 1-hour changes).
         Skips generation for times in masked_times.
@@ -449,6 +614,7 @@ class TafGenerator:
         # State Tracking
         curr_vis = init_vis
         curr_clouds = init_clouds
+        curr_wx = init_wx
         curr_wdir = init_wind_obj['d']
         curr_wspd = init_wind_obj['s']
         
@@ -465,28 +631,20 @@ class TafGenerator:
                 curr_wspd = state['wspd']
                 curr_vis = state['vis']
                 curr_clouds = state['clouds']
+                curr_wx = state['wx']
                 i += 1
                 continue
             
             # Check for changes vs Current Persisting State
             
-            # 1. Wind Change
-            # Rule: Direction change >= 60 OR Speed change >= 10?
-            # User Image also said: "wspd exceeds 10KT or more".
-            # For now, stick to standard significant change logic, plus the 10KT check.
+            # Wx Change Check (Base Logic)
+            wx_chg = (state['wx'] != curr_wx)
             
+            # 1. Wind Change
             diff_dir = abs(state['wdir'] - curr_wdir)
             if diff_dir > 180: diff_dir = 360 - diff_dir
-            
-            # Standard: Dir change > 60 AND mean speed > 10 (either before or after)
-            dir_significant = (diff_dir >= 60 and (state['wspd'] >= 10 or curr_wspd >= 10))
-            
-            # Speed significant: Change >= 10
+            dir_significant = (diff_dir >= 60) # User strict rule: Just check deviation > 60
             spd_significant = (abs(state['wspd'] - curr_wspd) >= 10)
-            
-            # "Exceeds 10KT" special check: If Crossing 10KT boundary?
-            # Maybe implicit in the above if change is large.
-            # Let's keep existing logic as it's robust.
             
             wind_chg = dir_significant or spd_significant
             
@@ -496,57 +654,94 @@ class TafGenerator:
             # 3. Cloud Change
             cloud_chg = (state['clouds'] != curr_clouds)
             
-            if wind_chg or vis_chg or cloud_chg:
-                # CANDIDATE CHANGE DETECTED at timeline[i]
+            if wind_chg or vis_chg or cloud_chg or wx_chg:
+                # CANDIDATE CHANGE
                 
                 # --- SMOOTHING LOGIC ---
-                # Peek at i+1. Does this new state persist?
                 is_transient = False
                 if i + 1 < len(timeline):
                     next_state = timeline[i+1]
                     
-                    # Check Wind consistency (Next state similar to Candidate state?)
+                    # Wx consistency
+                    wx_consistent = (state['wx'] == next_state['wx'])
+                    
                     d_diff_next = abs(state['wdir'] - next_state['wdir'])
                     if d_diff_next > 180: d_diff_next = 360 - d_diff_next
                     wind_consistent = (d_diff_next < 60) and (abs(state['wspd'] - next_state['wspd']) < 10)
                     
-                    # Check Vis consistency
                     vis_consistent = not self._check_vis_limit_change(state['vis'], next_state['vis'])
                     cloud_consistent = (state['clouds'] == next_state['clouds'])
                     
-                    # If the PRIMARY trigger for the change is NOT consistent, we drop it.
                     if wind_chg and not wind_consistent: is_transient = True
                     if vis_chg and not vis_consistent: is_transient = True
-                    # Partial mitigation for flip-flopping clouds
+                    if wx_chg and not wx_consistent: is_transient = True
                     if cloud_chg and not cloud_consistent: is_transient = True
                 
-                # Filter Transient
                 if is_transient:
-                    # Skip this hour, do not update current state
                     i += 1
                     continue
                     
                 # CONFIRMED CHANGE
-                start_dt = state['dt']
-                end_dt = start_dt + datetime.timedelta(hours=2) # Standard 2h trend
+                target_state = state
+                check_ahead = 1
                 
-                # Handle standard trend dates
+                while check_ahead <= 2 and (i + check_ahead) < len(timeline):
+                    next_s = timeline[i + check_ahead]
+                    
+                    n_wind = (abs(next_s['wdir'] - target_state['wdir']) >= 60) 
+                    n_vis = self._check_vis_limit_change(target_state['vis'], next_s['vis'])
+                    n_wx = (next_s['wx'] != target_state['wx'])
+                    n_cld = (next_s['clouds'] != target_state['clouds'])
+                    
+                    if n_wind or n_vis or n_cld or n_wx:
+                        target_state = next_s
+                        
+                    check_ahead += 1
+                
+                steps_to_skip = 0
+                if target_state != state:
+                     steps_to_skip = timeline.index(target_state) - i
+
+                start_dt = state['dt']
+                end_dt = start_dt + datetime.timedelta(hours=2)
+                
                 start_str = f"{start_dt.day:02d}{start_dt.hour:02d}"
                 end_str = f"{end_dt.day:02d}{end_dt.hour:02d}"
                 
-                # Format
-                wind_str = self._format_wind(state['wdir'], state['wspd'], state['wgust'])
+                out_parts = [f"BECMG {start_str}/{end_str}"]
                 
-                grp = f"BECMG {start_str}/{end_str} {wind_str} {state['vis']} {state['wx']} {state['clouds']}"
-                grp = " ".join(grp.split())
-                groups.append(grp)
+                # FIXED: Always Include Elements (Display Everything)
                 
-                # Update State
-                curr_wdir = state['wdir']
-                curr_wspd = state['wspd']
-                curr_vis = state['vis']
-                curr_clouds = state['clouds']
+                # 1. Wind
+                out_parts.append(self._format_wind(target_state['wdir'], target_state['wspd'], target_state['wgust'], is_vrb=target_state['is_vrb']))
                 
+                # 2. Vis
+                out_parts.append(target_state['vis'])
+                
+                # 3. Wx
+                if target_state['wx']:
+                    out_parts.append(target_state['wx'])
+                elif curr_wx and not target_state['wx']:
+                     out_parts.append("NSW")
+                
+                # 4. Clouds
+                out_parts.append(target_state['clouds'])
+
+                # Prevent Empty BECMG
+                grp = " ".join(part for part in out_parts if part).strip()
+                if len(out_parts) > 1: # Ensure we have content besides the header
+                    groups.append(grp)
+                
+                curr_wdir = target_state['wdir']
+                curr_wspd = target_state['wspd']
+                curr_vis = target_state['vis']
+                curr_clouds = target_state['clouds']
+                curr_wx = target_state['wx']
+                
+                i += (1 + steps_to_skip)
+                continue
+                
+            # If no change detected
             i += 1
             
         return groups
@@ -600,7 +795,7 @@ class TafGenerator:
 
         # 2. Base Conditions (Timeline[0])
         base = timeline[0]
-        init_wind = self._format_wind(base['wdir'], base['wspd'], base['wgust'])
+        init_wind = self._format_wind(base['wdir'], base['wspd'], base['wgust'], is_vrb=base['is_vrb'])
         taf_body = f"{init_wind} {base['vis']} {base['wx']} {base['clouds']}".strip()
         taf_body = " ".join(taf_body.split())
         
@@ -612,7 +807,7 @@ class TafGenerator:
         tempo_groups, masked_times = self._consolidate_tempo_groups(timeline)
         
         # Pass slice [1:] to skip comparing base vs base, AND mask
-        becmg_groups = self._generate_change_groups(timeline[1:], base['vis'], base['clouds'], init_wind_obj, masked_times)
+        becmg_groups = self._generate_change_groups(timeline[1:], base['vis'], base['clouds'], base['wx'], init_wind_obj, masked_times)
         
         # 4. Assemble & Sort
         all_groups = becmg_groups + tempo_groups
@@ -621,7 +816,7 @@ class TafGenerator:
         parts = [f"TAF {station} {issue_str} {validity} {taf_body}"]
         parts.extend(all_groups)
         
-        return "\n".join(parts)
+        return "\n".join(parts) + "="
 
     def generate_short_taf(self, imd_data, ogimet_data):
         station = ogimet_data.get('station', 'XXXX')
@@ -637,14 +832,14 @@ class TafGenerator:
              return f"TAF {station} {issue_str} {validity} NIL"
 
         base = timeline[0]
-        init_wind = self._format_wind(base['wdir'], base['wspd'], base['wgust'])
+        init_wind = self._format_wind(base['wdir'], base['wspd'], base['wgust'], is_vrb=base['is_vrb'])
         taf_body = f"{init_wind} {base['vis']} {base['wx']} {base['clouds']}".strip()
         taf_body = " ".join(taf_body.split())
         
         init_wind_obj = {'d': base['wdir'], 's': base['wspd']}
         
         tempo_groups, masked_times = self._consolidate_tempo_groups(timeline)
-        becmg_groups = self._generate_change_groups(timeline[1:], base['vis'], base['clouds'], init_wind_obj, masked_times)
+        becmg_groups = self._generate_change_groups(timeline[1:], base['vis'], base['clouds'], base['wx'], init_wind_obj, masked_times)
         
         all_groups = becmg_groups + tempo_groups
         all_groups.sort(key=lambda g: self._get_group_sort_key(g, issue_dt))
@@ -652,4 +847,5 @@ class TafGenerator:
         parts = [f"TAF {station} {issue_str} {validity} {taf_body}"]
         parts.extend(all_groups)
         
-        return "\n".join(parts)
+        return "\n".join(parts) + "="
+
