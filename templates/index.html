@@ -114,6 +114,28 @@
             color: #7f8c8d;
             margin-top: 10px;
         }
+        .header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .header-row h2 {
+            margin-bottom: 0;
+        }
+
+        .copy-btn {
+            background-color: #95a5a6;
+            width: auto;
+            padding: 5px 15px;
+            margin-top: 0;
+            font-size: 0.9rem;
+        }
+
+        .copy-btn:hover {
+            background-color: #7f8c8d;
+        }
     </style>
 </head>
 
@@ -143,15 +165,35 @@
 
         {% if long_taf %}
         <div class="card">
-            <h2>Long TAF (30 HR)</h2>
-            <div class="taf-box">{{ long_taf }}</div>
+            <div class="header-row">
+                <h2>Long TAF</h2>
+                <button class="copy-btn" onclick="copyToClipboard('long-taf')">Copy</button>
+            </div>
+            <div class="taf-box" id="long-taf">{{ long_taf }}</div>
 
-            <h2>Short TAF (9 HR)</h2>
-            <div class="taf-box">{{ short_taf }}</div>
-
-
+            <div class="header-row" style="margin-top: 20px;">
+                <h2>Short TAF</h2>
+                <button class="copy-btn" onclick="copyToClipboard('short-taf')">Copy</button>
+            </div>
+            <div class="taf-box" id="short-taf">{{ short_taf }}</div>
         </div>
         {% endif %}
+
+        <script>
+            function copyToClipboard(elementId) {
+                const text = document.getElementById(elementId).innerText;
+                navigator.clipboard.writeText(text).then(() => {
+                    const btn = document.querySelector(`button[onclick="copyToClipboard('${elementId}')"]`);
+                    const originalText = btn.innerText;
+                    btn.innerText = "Copied!";
+                    setTimeout(() => {
+                        btn.innerText = originalText;
+                    }, 2000);
+                }).catch(err => {
+                    console.error('Failed to copy: ', err);
+                });
+            }
+        </script>
 
         {% if debug_forms %}
         <div class="card">
