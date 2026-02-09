@@ -51,15 +51,18 @@ class TafGenerator:
     def _format_wind(self, d_str, s_str, g_str="0", is_vrb=None):
         """
         Standard Wind Formatting (Main TAF & BECMG).
-        Logic (User Defined previously):
-        If Speed >= 15 or Gust >= 17:
-             Avg = Gust - 10
-             Format: D(Avg)G(Gust)KT
-        Else:
-             Format: D(Speed)KT
-             
-        VRB Rule:
-        Only if is_vrb is True (Speed <= 3 for T and T+1) -> VRB
+        Logic:
+        1. Parse Speed/Gust.
+        2. VRB Logic:
+           - If is_vrb is True (forced by hysteresis) OR (s <= 3 and is_vrb is not False)
+           - Report "VRB{s}KT"
+           - IF GUST >= 10: Report "VRB{s}G{g}KT" (User strict requirement)
+        3. Regular Logic:
+           - If Speed >= 15 or Gust >= 17:
+                Avg = Gust - 10
+                Format: D(Avg)G(Gust)KT
+           - Else:
+                Format: D(Speed)KT
         """
         try:
             d = float(d_str or 0)
@@ -67,11 +70,7 @@ class TafGenerator:
             g = float(g_str or 0)
             
             d_val = int(round(d / 10.0) * 10)
-            
-            # User Request: If Wdeg < 10 (and > 0), round to 10
-            if 0 < d < 10:
-                d_val = 10
-            
+            if 0 < d < 10: d_val = 10
             if d_val == 0: d_val = 360 
             if d_val == 360 and s == 0: d_val = 0 
             
@@ -80,14 +79,22 @@ class TafGenerator:
             if s == 0:
                 return "00000KT"
             
-            if s <= 3:
-                # Use strict VRB flag if provided
-                if is_vrb is True:
-                     return f"VRB{int(s):02d}KT"
-                elif is_vrb is False:
-                     pass # Fall through to Directional
+            # Decide VRB State
+            is_variable = False
+            
+            # Explicit Flag Priority (from Hysteresis)
+            if is_vrb is True:
+                is_variable = True
+            # Auto-detect if not explicitly disabled
+            elif s <= 3 and is_vrb is not False:
+                is_variable = True
+                
+            if is_variable:
+                # User Rule: Include GUST if significant (>= 10) even for VRB
+                # Note: We do NOT use Avg = Gust - 10 for VRB.
+                if g >= 10:
+                     return f"VRB{int(s):02d}G{int(g):02d}KT"
                 else:
-                     # Legacy fallback
                      return f"VRB{int(s):02d}KT"
             
             # Gust Logic: Avg = Gust - 10
@@ -151,13 +158,13 @@ class TafGenerator:
             ccb = float(entry.get('CCB', '0'))
             
             # --- Weather Codes (Rain Only) ---
-            if eval_rain >= 1:
+            if eval_rain >= 0.1:
                 # User Rules (Applied to Sum) for INTENSITY only
                 if eval_rain >= 65: 
                     wx.append("+RA")
                 elif eval_rain >= 15:
                     wx.append("RA")
-                else: 
+                elif eval_rain > 0: 
                     wx.append("-RA")
             else:
                 # No Rain -> Check RH-based Weather
@@ -214,7 +221,7 @@ class TafGenerator:
             if lcb == 0 and ccb == 0:
                 cloud_str = "NSC"
             else:
-                # LCB or CCB is non-zero -> Check Persistence
+                # LCB/CCB is non-zero -> Check Persistence
                 persisted_clouds = None
                 
                 if forecast_dt and history:
@@ -455,6 +462,43 @@ class TafGenerator:
             
             curr_dt += datetime.timedelta(hours=1)
             
+        # --- Hysteresis for VRB ---
+        # Enter VRB: wspd <= 3 for >= 2 consecutive hours
+        # Exit VRB: wspd >= 5 for >= 2 consecutive hours
+        # Initialize State (assume Directional start, or check first few?)
+        # To be safe and strict, we start Directional and let the counter build up.
+        
+        current_state_vrb = False
+        count_le_3 = 0
+        count_ge_5 = 0
+        
+        for i in range(len(timeline)):
+            wspd = timeline[i]['wspd']
+            
+            # Track counts
+            if wspd <= 3:
+                count_le_3 += 1
+            else:
+                count_le_3 = 0
+                
+            if wspd >= 5:
+                count_ge_5 += 1
+            else:
+                count_ge_5 = 0
+                
+            # State Transitions
+            if not current_state_vrb:
+                # Attempt to Enter VRB
+                if count_le_3 >= 2:
+                    current_state_vrb = True
+            else:
+                # Attempt to Exit VRB
+                if count_ge_5 >= 2:
+                    current_state_vrb = False
+            
+            # Apply State
+            timeline[i]['is_vrb'] = current_state_vrb
+
         return timeline
 
     def _consolidate_tempo_groups(self, timeline):
@@ -599,6 +643,108 @@ class TafGenerator:
             else:
                 i += 1
 
+        # --- VISIBILITY TEMPO LOGIC (Separate Pass) ---
+        # Rule: If Vis <= 1500m for >= 2 consecutive hours, Add "TEMPO HH/HH [min_vis] [valid_wx]"
+        # Max Validity: 4 Hours
+        
+        i = 0
+        while i < len(timeline):
+            state = timeline[i]
+            
+            # Skip if already covered by Wind/Rain TEMPO
+            if state['dt'] in masked_times:
+                i += 1
+                continue
+                
+            try:
+                vis_val = int(state['vis'])
+            except:
+                vis_val = 9999
+            
+            if vis_val <= 1500:
+                # 1. Check for Continuity (>= 2 hours required)
+                # Look ahead
+                j = i + 1
+                consecutive_count = 1
+                
+                # Scan block of low vis
+                while j < len(timeline):
+                    # Break on gap or masked time
+                    next_dt = timeline[j]['dt']
+                    if next_dt in masked_times:
+                        break
+                        
+                    try:
+                        next_v = int(timeline[j]['vis'])
+                    except:
+                        next_v = 9999
+                        
+                    if next_v > 1500:
+                        break
+                        
+                    consecutive_count += 1
+                    j += 1
+                
+                if consecutive_count >= 2:
+                    block_start = i
+                    block_end = j
+                    
+                    # Process block in 4h chunks
+                    curr = block_start
+                    while curr < block_end:
+                        chunk_end = min(curr + 4, block_end)
+                        
+                        s_dt = timeline[curr]['dt']
+                        e_dt_validity = timeline[chunk_end - 1]['dt'] + datetime.timedelta(hours=1)
+                        
+                        s_str = f"{s_dt.day:02d}{s_dt.hour:02d}"
+                        e_str = f"{e_dt_validity.day:02d}{e_dt_validity.hour:02d}"
+                        
+                        # Determine conditions
+                        min_vis_val = 9999
+                        min_vis_str = "9999"
+                        
+                        # Wx Collection
+                        wx_set = set()
+                        
+                        for k in range(curr, chunk_end):
+                            v_str = timeline[k]['vis']
+                            try:
+                                v_int = int(v_str)
+                                if v_int < min_vis_val:
+                                    min_vis_val = v_int
+                                    min_vis_str = v_str
+                            except:
+                                pass
+                            
+                            w_k = timeline[k]['wx']
+                            if w_k:
+                                for code in w_k.split():
+                                    if code not in ["NSW", ""]:
+                                        wx_set.add(code)
+                        
+                        # Sort Wx
+                        wx_list = sorted(list(wx_set))
+                        wx_str = " ".join(wx_list)
+                        
+                        # Update Mask
+                        mask_cursor = s_dt
+                        while mask_cursor < e_dt_validity:
+                            masked_times.add(mask_cursor)
+                            mask_cursor += datetime.timedelta(hours=1)
+                        
+                        # Format
+                        tempo_str = f"TEMPO {s_str}/{e_str} {min_vis_str} {wx_str}".strip()
+                        groups.append(tempo_str)
+                        
+                        curr = chunk_end
+                    
+                    i = block_end
+                else:
+                    # Not enough duration
+                    i += 1
+            else:
+                i += 1
 
         return groups, masked_times
 
@@ -617,6 +763,7 @@ class TafGenerator:
         curr_wx = init_wx
         curr_wdir = init_wind_obj['d']
         curr_wspd = init_wind_obj['s']
+        curr_is_vrb = init_wind_obj.get('is_vrb', False)
         
         i = 0
         while i < len(timeline):
@@ -632,6 +779,7 @@ class TafGenerator:
                 curr_vis = state['vis']
                 curr_clouds = state['clouds']
                 curr_wx = state['wx']
+                curr_is_vrb = state['is_vrb']
                 i += 1
                 continue
             
@@ -646,7 +794,10 @@ class TafGenerator:
             dir_significant = (diff_dir >= 60) # User strict rule: Just check deviation > 60
             spd_significant = (abs(state['wspd'] - curr_wspd) >= 10)
             
-            wind_chg = dir_significant or spd_significant
+            # VRB Change Check
+            vrb_chg = (state['is_vrb'] != curr_is_vrb)
+            
+            wind_chg = dir_significant or spd_significant or vrb_chg
             
             # 2. Vis Change
             vis_chg = self._check_vis_limit_change(curr_vis, state['vis'])
@@ -654,7 +805,9 @@ class TafGenerator:
             # 3. Cloud Change
             cloud_chg = (state['clouds'] != curr_clouds)
             
-            if wind_chg or vis_chg or cloud_chg or wx_chg:
+            # User Rule: Rain (Wx) does NOT trigger BECMG by itself.
+            # Only Wind, Vis, or Cloud changes trigger it.
+            if wind_chg or vis_chg or cloud_chg:
                 # CANDIDATE CHANGE
                 
                 # --- SMOOTHING LOGIC ---
@@ -669,10 +822,14 @@ class TafGenerator:
                     if d_diff_next > 180: d_diff_next = 360 - d_diff_next
                     wind_consistent = (d_diff_next < 60) and (abs(state['wspd'] - next_state['wspd']) < 10)
                     
+                    # Check VRB consistency
+                    vrb_consistent = (state['is_vrb'] == next_state['is_vrb'])
+                    if vrb_chg and not vrb_consistent: is_transient = True
+                    
                     vis_consistent = not self._check_vis_limit_change(state['vis'], next_state['vis'])
                     cloud_consistent = (state['clouds'] == next_state['clouds'])
                     
-                    if wind_chg and not wind_consistent: is_transient = True
+                    if (dir_significant or spd_significant) and not wind_consistent: is_transient = True
                     if vis_chg and not vis_consistent: is_transient = True
                     if wx_chg and not wx_consistent: is_transient = True
                     if cloud_chg and not cloud_consistent: is_transient = True
@@ -692,8 +849,9 @@ class TafGenerator:
                     n_vis = self._check_vis_limit_change(target_state['vis'], next_s['vis'])
                     n_wx = (next_s['wx'] != target_state['wx'])
                     n_cld = (next_s['clouds'] != target_state['clouds'])
+                    n_vrb = (next_s['is_vrb'] != target_state['is_vrb'])
                     
-                    if n_wind or n_vis or n_cld or n_wx:
+                    if n_wind or n_vis or n_cld or n_wx or n_vrb:
                         target_state = next_s
                         
                     check_ahead += 1
@@ -737,6 +895,7 @@ class TafGenerator:
                 curr_vis = target_state['vis']
                 curr_clouds = target_state['clouds']
                 curr_wx = target_state['wx']
+                curr_is_vrb = target_state['is_vrb']
                 
                 i += (1 + steps_to_skip)
                 continue
@@ -801,7 +960,7 @@ class TafGenerator:
         
         # 3. Smart Groups
         # Need distinct init objects for tracking
-        init_wind_obj = {'d': base['wdir'], 's': base['wspd']}
+        init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'is_vrb': base['is_vrb']}
         
         # Determine TEMPOs first and get mask
         tempo_groups, masked_times = self._consolidate_tempo_groups(timeline)
@@ -836,7 +995,7 @@ class TafGenerator:
         taf_body = f"{init_wind} {base['vis']} {base['wx']} {base['clouds']}".strip()
         taf_body = " ".join(taf_body.split())
         
-        init_wind_obj = {'d': base['wdir'], 's': base['wspd']}
+        init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'is_vrb': base['is_vrb']}
         
         tempo_groups, masked_times = self._consolidate_tempo_groups(timeline)
         becmg_groups = self._generate_change_groups(timeline[1:], base['vis'], base['clouds'], base['wx'], init_wind_obj, masked_times)
