@@ -193,7 +193,24 @@ class IMDScraper:
         print(f"[IMD] Searching for station '{station}' to download...")
 
         base_url = "https://nwp.imd.gov.in"
-        start_page = "tafstndel.html" # Default landing page (North)
+        
+        # Map specific stations to their MWO page to speed up search
+        # Default fallback is Delhi (tafstndel.html) if not in map
+        station_mwo_map = {
+            # Mumbai MWO
+            "VABB": "tafstnmum.html",
+            "VANM": "tafstnmum.html",
+            "VAAU": "tafstnmum.html",
+            "VASD": "tafstnmum.html",
+            "VAJJ": "tafstnmum.html",
+            "VAKP": "tafstnmum.html",
+            # Chennai MWO (As per user request)
+            "VOLT": "tafstnche.html", 
+            "VOSR": "tafstnche.html", 
+            "VOND": "tafstnche.html" 
+        }
+        
+        start_page = station_mwo_map.get(station, "tafstndel.html")
         
         visited = set()
         queue = [start_page]

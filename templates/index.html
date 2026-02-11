@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TAF Generator</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
         :root {
             --bg-color: #f4f6f9;
@@ -58,7 +59,8 @@
             font-size: 0.9rem;
         }
 
-        input[type="text"] {
+        input[type="text"],
+        select {
             width: 100%;
             padding: 10px;
             margin-top: 5px;
@@ -114,6 +116,7 @@
             color: #7f8c8d;
             margin-top: 10px;
         }
+
         .header-row {
             display: flex;
             justify-content: space-between;
@@ -123,18 +126,46 @@
 
         .header-row h2 {
             margin-bottom: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
 
-        .copy-btn {
-            background-color: #95a5a6;
-            width: auto;
-            padding: 5px 15px;
-            margin-top: 0;
+        .action-group {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .action-link {
+            cursor: pointer;
+            color: #7f8c8d;
             font-size: 0.9rem;
+            text-decoration: none;
+            transition: color 0.2s;
         }
 
-        .copy-btn:hover {
-            background-color: #7f8c8d;
+        .action-link:hover {
+            color: var(--accent);
+            text-decoration: underline;
+        }
+
+        .edited-badge {
+            font-size: 0.7rem;
+            background-color: #f1c40f;
+            color: #fff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            display: none;
+            /* Hidden by default */
+            vertical-align: middle;
+        }
+
+        .taf-box[contenteditable="true"] {
+            border: 2px solid var(--accent);
+            outline: none;
+            background-color: #34495e;
+            /* Slightly lighter when editing */
         }
     </style>
 </head>
@@ -148,9 +179,19 @@
             <form action="/generate" method="POST">
 
 
-                <label for="station">Station Code</label>
-                <input type="text" id="station" name="station" value="{{ last_station or 'VABB' }}"
-                    placeholder="e.g. VABB">
+                <label for="station">Select Station</label>
+                <select id="station" name="station">
+                    <option value="VABB" {% if not last_station or last_station=='VABB' %}selected{% endif %}>MUMBAI
+                        (VABB)</option>
+                    <option value="VANM" {% if last_station=='VANM' %}selected{% endif %}>NAVI MUMBAI (VANM)</option>
+                    <option value="VAAU" {% if last_station=='VAAU' %}selected{% endif %}>AURANGABAD (VAAU)</option>
+                    <option value="VASD" {% if last_station=='VASD' %}selected{% endif %}>SHIRDI (VASD)</option>
+                    <option value="VAJJ" {% if last_station=='VAJJ' %}selected{% endif %}>JUHU (VAJJ)</option>
+                    <option value="VAKP" {% if last_station=='VAKP' %}selected{% endif %}>KOLHAPUR (VAKP)</option>
+                    <option value="VOLT" {% if last_station=='VOLT' %}selected{% endif %}>LATUR (VOLT)</option>
+                    <option value="VOSR" {% if last_station=='VOSR' %}selected{% endif %}>SINDHUDURG (VOSR)</option>
+                    <option value="VOND" {% if last_station=='VOND' %}selected{% endif %}>NANDED (VOND)</option>
+                </select>
 
                 <button type="submit">Generate TAF</button>
             </form>
@@ -166,32 +207,80 @@
         {% if long_taf %}
         <div class="card">
             <div class="header-row">
-                <h2>Long TAF</h2>
-                <button class="copy-btn" onclick="copyToClipboard('long-taf')">Copy</button>
+                <h2>Long TAF <span id="long-taf-edited" class="edited-badge">EDITED</span></h2>
+                <div class="action-group">
+                    <span class="action-link" onclick="enableEdit('long-taf')">edit</span>
+                    <span class="action-link" onclick="generatePDF('long-taf', 'Long_TAF')">.pdf</span>
+                    <span class="action-link" onclick="copyToClipboard('long-taf', this)">copy</span>
+                </div>
             </div>
             <div class="taf-box" id="long-taf">{{ long_taf }}</div>
 
             <div class="header-row" style="margin-top: 20px;">
-                <h2>Short TAF</h2>
-                <button class="copy-btn" onclick="copyToClipboard('short-taf')">Copy</button>
+                <h2>Short TAF <span id="short-taf-edited" class="edited-badge">EDITED</span></h2>
+                <div class="action-group">
+                    <span class="action-link" onclick="enableEdit('short-taf')">edit</span>
+                    <span class="action-link" onclick="generatePDF('short-taf', 'Short_TAF')">.pdf</span>
+                    <span class="action-link" onclick="copyToClipboard('short-taf', this)">copy</span>
+                </div>
             </div>
             <div class="taf-box" id="short-taf">{{ short_taf }}</div>
         </div>
         {% endif %}
 
         <script>
-            function copyToClipboard(elementId) {
+            function copyToClipboard(elementId, btnElement) {
                 const text = document.getElementById(elementId).innerText;
                 navigator.clipboard.writeText(text).then(() => {
-                    const btn = document.querySelector(`button[onclick="copyToClipboard('${elementId}')"]`);
-                    const originalText = btn.innerText;
-                    btn.innerText = "Copied!";
+                    const originalText = btnElement.innerText;
+                    btnElement.innerText = "copied!";
                     setTimeout(() => {
-                        btn.innerText = originalText;
+                        btnElement.innerText = originalText;
                     }, 2000);
                 }).catch(err => {
                     console.error('Failed to copy: ', err);
                 });
+            }
+
+            function enableEdit(elementId) {
+                const box = document.getElementById(elementId);
+                const isEditable = box.getAttribute('contenteditable') === 'true';
+
+                if (!isEditable) {
+                    // Enter Edit Mode
+                    box.setAttribute('contenteditable', 'true');
+                    box.focus();
+
+                    // Add listener to detect changes
+                    box.addEventListener('input', function () {
+                        const badgeStartId = elementId + '-edited';
+                        document.getElementById(badgeStartId).style.display = 'inline-block';
+                    }, { once: true });
+
+                } else {
+                    // Exit Edit Mode
+                    box.setAttribute('contenteditable', 'false');
+                }
+            }
+
+            function generatePDF(elementId, filenamePrefix) {
+                const { jsPDF } = window.jspdf;
+                const doc = new jsPDF();
+
+                const content = document.getElementById(elementId).innerText;
+                const station = document.getElementById('station').value || 'STATION';
+
+                // Extract Issue Time (DDHHMMZ)
+                const timeStr = content.match(/\d{6}Z/);
+                const timeSuffix = timeStr ? `_${timeStr[0]}` : '';
+
+                doc.setFont("monospace"); // Use monospace for TAF
+                doc.setFontSize(12);
+
+                const lines = doc.splitTextToSize(content, 180);
+
+                doc.text(lines, 10, 10);
+                doc.save(`${station}_${filenamePrefix}${timeSuffix}.pdf`);
             }
         </script>
 
