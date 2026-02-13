@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+.git
+.gitignore
+.env
+imd_cache/
+savedTAFs/
+debug_*.html
+debug_*.txt
+stress_test.py
+.generated/
+.gemini/

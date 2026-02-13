@@ -4,6 +4,7 @@ import re
 import datetime
 import time
 import random
+import os
 
 class OgimetScraper:
     def __init__(self):
@@ -74,7 +75,7 @@ class OgimetScraper:
             return latest
         
         # DEBUG: Save HTML
-        with open("d:/taFor/debug_ogimet.html", "w", encoding="utf-8") as f:
+        with open(os.path.join(os.getcwd(), "debug_ogimet.html"), "w", encoding="utf-8") as f:
             f.write(soup.prettify())
             
         return {"error": "No valid METAR data rows found. HTML dumped to debug_ogimet.html"}
@@ -186,8 +187,8 @@ class IMDScraper:
         """
         station = station_code.upper()
         # Ensure cache directory exists
-        cache_dir = "d:/taFor/imd_cache"
-        import os
+        # Use relative path for Docker compatibility
+        cache_dir = os.path.join(os.getcwd(), "imd_cache")
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
             
@@ -301,10 +302,10 @@ class IMDScraper:
                 versioned_filename = f"{station.upper()}_{date_str}_{hour}UTC.txt"
                 
                 # UPDATE: User Request - Subdirectory per station
-                # d:/taFor/imd_cache/VABB/VABB_...txt
-                station_dir = f"d:/taFor/imd_cache/{station.upper()}"
+                # Relative path: ./imd_cache/VABB/VABB_...txt
+                cache_root = os.path.join(os.getcwd(), "imd_cache")
+                station_dir = os.path.join(cache_root, station.upper())
                 
-                import os
                 if not os.path.exists(station_dir):
                     os.makedirs(station_dir)
                     
@@ -362,11 +363,12 @@ class IMDScraper:
 
     def read_from_cache(self, station_code):
         import glob
-        import os
+        # import os <-- Removed
         
         station = station_code.upper()
         # UPDATE: Read from Station Subdirectory
-        cache_dir = f"d:/taFor/imd_cache/{station}"
+        # cache_dir = f"d:/taFor/imd_cache/{station}"
+        cache_dir = os.path.join(os.getcwd(), "imd_cache", station)
         
         # Pattern: STATION_YYYYMMDD_HHUTC.txt
         pattern = os.path.join(cache_dir, f"{station}_*UTC.txt")
@@ -377,7 +379,8 @@ class IMDScraper:
              # Fallback check root just in case (Legacy support?)
              # Or just fail since we are migrating structure.
              # Let's check root for legacy immediate compatibility just in case
-             fallback_pattern = f"d:/taFor/imd_cache/{station}_*UTC.txt"
+             # fallback_pattern = f"d:/taFor/imd_cache/{station}_*UTC.txt"
+             fallback_pattern = os.path.join(os.getcwd(), "imd_cache", f"{station}_*UTC.txt")
              files = glob.glob(fallback_pattern)
              
              if not files:
