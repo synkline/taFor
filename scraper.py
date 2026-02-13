@@ -130,10 +130,9 @@ class IMDScraper:
         
         # Add headers to mimic a real browser to avoid "Unauthorized Activity" blocks
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Connection": "keep-alive",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
             "Upgrade-Insecure-Requests": "1"
         })
         # Note: Do NOT set 'Origin' globally. It should only be on POST requests if required, 
@@ -144,18 +143,20 @@ class IMDScraper:
         
         self.url = "https://nwp.imd.gov.in/gfs_taf.php"
 
-    def _get_with_retry(self, url, timeout=10, retries=3):
+    def _get_with_retry(self, url, timeout=10, retries=6):
         """
-        Executes a GET request with exponential backoff retry logic.
+        Executes a GET request with more aggressive exponential backoff retry logic
+        specifically to handle IMD's frequent connection resets.
         """
         for i in range(retries):
             try:
                 response = self.session.get(url, timeout=timeout)
                 return response
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
                 if i < retries - 1:
-                    sleep_time = (2 ** i) + random.uniform(0, 1)
-                    print(f"[IMD] Connection error ({e}). Retrying in {sleep_time:.2f}s...")
+                    # Longer, more varied backoff for flakiness
+                    sleep_time = (2 ** i) * 1.5 + random.uniform(1, 3)
+                    print(f"[IMD] Server busy/reset connection ({type(e).__name__}). Retrying ({i+1}/{retries}) in {sleep_time:.2f}s...")
                     time.sleep(sleep_time)
                 else:
                     print(f"[IMD] Max retries reached for {url}.")

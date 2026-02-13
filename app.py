@@ -4,7 +4,7 @@ from scraper import IMDScraper, OgimetScraper
 from taf_generator import TafGenerator
 
 app = Flask(__name__)
-app.secret_key = 'super_secret_taf_key'  # Needed for flash messages
+app.secret_key = 'super_secret_taf_key'  
 
 @app.route('/', methods=['GET'])
 def index():
@@ -14,27 +14,25 @@ def index():
 def generate():
     station = request.form.get('station', 'VABB').upper()
     
-    # Initialize Scrapers
+    # initialize the scrapers
     imd_scraper = IMDScraper()
     ogimet_scraper = OgimetScraper()
     generator = TafGenerator()
 
-    # Fetch Data
+    # fetch data from IMD and Ogimet
     # IMD
     imd_data = imd_scraper.fetch_data(station)
     
     # Ogimet
     ogimet_data = ogimet_scraper.fetch_data(station)
 
-    # Check for critical errors (blocking TAF generation)
-    # We allow partial generation if possible, but usually TAF needs both.
-    
+    # checking for critical errors (server blocking TAF generation requests)   
     error_msg = None
     debug_forms = None
     
     if "error" in imd_data:
         error_msg = f"IMD Error: {imd_data['error']}"
-        debug_forms = imd_data.get('debug_forms', None) # Get debug forms if available
+        debug_forms = imd_data.get('debug_forms', None) # to get debug forms if available
         if debug_forms:
             print("\n[DEBUG info for Developer]")
             print(str(debug_forms))
@@ -47,7 +45,7 @@ def generate():
     
     if not error_msg:
         try:
-            long_taf = generator.generate_long_taf(imd_data, ogimet_data)
+            long_taf = generator.generate_long_taf(imd_data, ogimet_data) 
             short_taf = generator.generate_short_taf(imd_data, ogimet_data)
         except Exception as e:
             error_msg = f"Generation Error: {str(e)}"
@@ -61,5 +59,5 @@ def generate():
 
 
 if __name__ == '__main__':
-    # Run slightly verbose for dev
+    # start app in debug mode to get more info during dev process
     app.run(debug=True, port=5000)

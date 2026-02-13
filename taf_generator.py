@@ -6,7 +6,7 @@ class TafGenerator:
 
     def _get_standard_issue_time(self, now=None):
         """
-        Returns the closest standard TAF issue time (05, 11, 17, 23 UTC)
+        returns closest TAF issue time (05, 11, 17, 23 UTC)
         and the corresponding issue datetime object.
         """
         if now is None:
@@ -14,7 +14,7 @@ class TafGenerator:
 
         candidates = [5, 11, 17, 23]
         
-        # Find closest hour
+        # find closest hour
         current_hour = now.hour
         best_hour = candidates[0]
         min_diff = 24
@@ -25,13 +25,13 @@ class TafGenerator:
                 min_diff = diff
                 best_hour = h
         
-        # Proper slot allocation
+        # allocate proper slots
         if 2 <= current_hour < 8: best_hour = 5
         elif 8 <= current_hour < 14: best_hour = 11
         elif 14 <= current_hour < 20: best_hour = 17
         else: 
             best_hour = 23
-            # If we are in the early hours (0, 1) of Day X, the 2300 slot belongs to Day X-1
+            # when in early hours (0, 1) of Day X, the 2300 slot belongs to Day X-1
             if current_hour < 2:
                 now = now - datetime.timedelta(days=1)
         
@@ -42,7 +42,7 @@ class TafGenerator:
         try:
             val = int(float(val))
             rounded = round(val / 10) * 10
-            if rounded == 0: return "360" # Prefer 360 for direction unless 00000KT
+            if rounded == 0: return "360" # as 000 is used for calm winds, 360 used for 0 degree(north)
             if rounded == 360: return "360"
             return f"{rounded:03d}"
         except (ValueError, TypeError):
@@ -50,19 +50,7 @@ class TafGenerator:
 
     def _format_wind(self, d_str, s_str, g_str="0", is_vrb=None):
         """
-        Standard Wind Formatting (Main TAF & BECMG).
-        Logic:
-        1. Parse Speed/Gust.
-        2. VRB Logic:
-           - If is_vrb is True (forced by hysteresis) OR (s <= 3 and is_vrb is not False)
-           - Report "VRB{s}KT"
-           - IF GUST >= 10: Report "VRB{s}G{g}KT" (User strict requirement)
-        3. Regular Logic:
-           - If Speed >= 15 or Gust >= 17:
-                Avg = Gust - 10
-                Format: D(Avg)G(Gust)KT
-           - Else:
-                Format: D(Speed)KT
+        standard wind formatting
         """
         try:
             d = float(d_str or 0)
@@ -79,25 +67,21 @@ class TafGenerator:
             if s == 0:
                 return "00000KT"
             
-            # Decide VRB State
+            # decide VRB state
             is_variable = False
             
-            # Explicit Flag Priority (from Hysteresis)
             if is_vrb is True:
                 is_variable = True
-            # Auto-detect if not explicitly disabled
             elif s <= 3 and is_vrb is not False:
                 is_variable = True
                 
             if is_variable:
-                # User Rule: Include GUST if significant (>= 10) even for VRB
-                # Note: We do NOT use Avg = Gust - 10 for VRB.
                 if g >= 10:
                      return f"VRB{int(s):02d}G{int(g):02d}KT"
                 else:
                      return f"VRB{int(s):02d}KT"
             
-            # Gust Logic: Avg = Gust - 10
+            # gust logic: avg = gust - 10
             if s >= 15 or g >= 17:
                 avg_val = int(g - 10)
                 if avg_val < 0: avg_val = int(s)
@@ -110,7 +94,7 @@ class TafGenerator:
 
     def _extract_historical_height(self, target_dt, history):
         """
-        Finds the cloud height from a METAR ~24 hours prior.
+        cloud height from METAR ~24 hours prior.
         """
         if not history: return None
         
@@ -123,43 +107,40 @@ class TafGenerator:
                 min_diff = diff
                 best_dt = dt_key
                 
-        # Only accept if within reasonable window (e.g. +/- 1.5 hours)
+        # accepts within reasonable window (+/- 90 min)
         if min_diff > datetime.timedelta(minutes=90):
             return None
             
         metar_data = history.get(best_dt)
         if not metar_data: return None
         
-        # Parse Cloud String from METAR (e.g. "FEW030 SCT100")
+        # for parsing clouds from Ogimet METAR
         c_raw = metar_data.get('clouds_raw', '')
-        # Pattern: 3 letters + 3 digits (e.g. FEW030)
+        # pattern is  3 letters + 3 digits
         import re
         matches = re.findall(r'[A-Z]{3}(\d{3})', c_raw)
         if matches:
-            return matches[0] # Return first layer height
+            return matches[0] # returns height for first cloud layer 
         return None
 
     def _get_projected_conditions(self, entry, forecast_dt=None, history=None, rain_3hr_sum=None):
         """
-        Estimates Vis, Weather, Clouds based on IMD Forecast Data.
-        rain_3hr_sum: Optional pre-calculated centered 3hr sum. If None, uses entry['Rain'].
+        estimates visibility, weather, clouds based on IMD data.
         """
-        # Defaults
+        # default values
         final_vis = "9999"
         wx = []
         cloud_str = "NSC"
         
         try:
-            # We still use rain for Wx Codes (-RA/RA/+RA) but NOT for visibility
             rain = float(entry.get('Rain', '0'))
             eval_rain = rain_3hr_sum if rain_3hr_sum is not None else rain
             
             lcb = float(entry.get('LCB', '0'))
             ccb = float(entry.get('CCB', '0'))
             
-            # --- Weather Codes (Rain Only) ---
+            # rain weather codes
             if eval_rain >= 0.1:
-                # User Rules (Applied to Sum) for INTENSITY only
                 if eval_rain >= 65: 
                     wx.append("+RA")
                 elif eval_rain >= 15:
@@ -167,10 +148,7 @@ class TafGenerator:
                 elif eval_rain > 0: 
                     wx.append("-RA")
             else:
-                # No Rain -> Check RH-based Weather
-                # Weather = FU , If RH <= 60% & Rainfall = 0
-                # Weather = HZ, if 60% < RH <=75% & Rainfall = 0
-                # Weather = BR, if RH > 75% & Rainfall = 0
+                # when no rain we use RH% to tell weather type
                 try:
                     rh = float(entry.get('RH', '0'))
                     if rh <= 60:
@@ -180,17 +158,14 @@ class TafGenerator:
                     elif rh > 75:
                         wx.append("BR")
                 except:
-                    pass
-            
-            # Note: Removed RH-based Fog/Mist/Haze logic as per instruction to remove IMD-calc visibility.
-                    
-            # --- Visibility Determination ---
-            # Priority: Exact Time -> Persistence (24h) -> Persistence (48h) -> Fallback (9999)
+                    pass               
+            #  visibility logic
+            # the exacr time -> 24 hr fallback -> 48 hr fallback -> or else 9999(nil)
             
             if forecast_dt and history:
                 vis_found = False
                 
-                # 1. Exact Time Match
+                # 1. for exact time 
                 hist_metar_exact = self._find_matching_metar(forecast_dt, history)
                 if hist_metar_exact:
                     v_hist = hist_metar_exact.get('visibility_raw')
@@ -198,7 +173,7 @@ class TafGenerator:
                         final_vis = v_hist
                         vis_found = True
                 
-                # 2. Try 24h Lookback
+                # 2. 24h fallback
                 if not vis_found:
                     target_hist_24 = forecast_dt - datetime.timedelta(hours=24)
                     hist_metar_24 = self._find_matching_metar(target_hist_24, history)
@@ -208,7 +183,7 @@ class TafGenerator:
                              final_vis = v_hist
                              vis_found = True
                 
-                # 3. Try 48h Lookback if 24h failed
+                # 3.  48h fallback 
                 if not vis_found:
                     target_hist_48 = forecast_dt - datetime.timedelta(hours=48)
                     hist_metar_48 = self._find_matching_metar(target_hist_48, history)
@@ -217,22 +192,22 @@ class TafGenerator:
                         if v_hist and v_hist != 'N/A':
                              final_vis = v_hist
 
-            # --- Clouds ---
+            # cloud when
             if lcb == 0 and ccb == 0:
                 cloud_str = "NSC"
             else:
-                # LCB/CCB is non-zero -> Check Persistence
+                # when LCB/CCB are non-zero check for
                 persisted_clouds = None
                 
                 if forecast_dt and history:
-                    # 1. Exact Time Match
+                    # 1. exact time 
                     hist_metar_exact = self._find_matching_metar(forecast_dt, history)
                     if hist_metar_exact:
                         c_raw = hist_metar_exact.get('clouds_raw')
-                        if c_raw and c_raw != 'N/A': # Allow NSC here if it's explicit
+                        if c_raw and c_raw != 'N/A': # allow NSC here
                             persisted_clouds = c_raw
 
-                    # 2. Try 24h Lookback
+                    # 2. 24h fallback
                     if not persisted_clouds:
                         target_hist_24 = forecast_dt - datetime.timedelta(hours=24)
                         hist_metar_24 = self._find_matching_metar(target_hist_24, history)
@@ -241,7 +216,7 @@ class TafGenerator:
                             if c_raw and c_raw != 'N/A' and c_raw != 'NSC':
                                 persisted_clouds = c_raw
                     
-                    # 3. Try 48h Lookback if 24h failed
+                    # 3.  48h fallback 
                     if not persisted_clouds:
                         target_hist_48 = forecast_dt - datetime.timedelta(hours=48)
                         hist_metar_48 = self._find_matching_metar(target_hist_48, history)
@@ -253,9 +228,7 @@ class TafGenerator:
                 if persisted_clouds:
                     cloud_str = persisted_clouds
                 else:
-                    # Fallback if non-zero clouds but no history? 
-                    # User instruction: "pick cloud from previous day". 
-                    # If unavailable, we default to NSC to avoid inventing data.
+                    # fallback if non-zero clouds but no history available default to NSC 
                     cloud_str = "NSC"
             
             wx_str = " ".join(wx)
