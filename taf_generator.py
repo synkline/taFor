@@ -123,14 +123,14 @@ class TafGenerator:
             return matches[0] # returns height for first cloud layer 
         return None
 
-    def _get_projected_conditions(self, entry, forecast_dt=None, history=None, rain_3hr_sum=None):
+    def _get_projected_conditions(self, entry, forecast_dt=None, history=None, rain_3hr_sum=None, prev_vis="9999", prev_clouds="NSC"):
         """
         estimates visibility, weather, clouds based on IMD data.
         """
         # default values
-        final_vis = "9999"
+        final_vis = prev_vis 
         wx = []
-        cloud_str = "NSC"
+        cloud_str = prev_clouds 
         
         try:
             rain = float(entry.get('Rain', '0'))
@@ -248,9 +248,12 @@ class TafGenerator:
            if val < 5000:
                return f"{int(round(val/100)*100):04d}"
                
-           # For 5000-9000, usually standard is 1000 steps, or just report 9999 if >10km
-           # We will fallback to 9999 for anything >= 5000 to match previous "bucket" logic style 
-           # but using the standard "clear" code instead of 5000.
+           # Standard 1000m steps for 5000 - 9999
+           if val < 9999:
+               # Map to nearest 1000 (e.g. 5000, 6000, 7000)
+               # Note: 9000 is valid. 9999 is next step.
+               return f"{int(round(val/1000)*1000):04d}"
+
            return "9999"
         except:
            return "9999"
@@ -363,6 +366,10 @@ class TafGenerator:
 
         # 2. Iterate Hourly from Start to End
         curr_dt = start_valid
+        
+        last_known_vis = "9999"
+        last_known_clouds = "NSC"
+        
         while curr_dt < end_valid:
             entry = data_map.get(curr_dt)
             
@@ -381,7 +388,18 @@ class TafGenerator:
                 rain_3hr = rain_prev + rain_t + rain_next
                 
                 # Process Conditions using 3hr Sum for thresholds
-                p_vis, p_wx, p_clouds = self._get_projected_conditions(entry, curr_dt, history, rain_3hr_sum=rain_3hr)
+                p_vis, p_wx, p_clouds = self._get_projected_conditions(
+                    entry, 
+                    curr_dt, 
+                    history, 
+                    rain_3hr_sum=rain_3hr,
+                    prev_vis=last_known_vis,
+                    prev_clouds=last_known_clouds
+                )
+                
+                # Update persistent state
+                last_known_vis = p_vis
+                last_known_clouds = p_clouds
                 
                 # Logic moved to _get_projected_conditions:
                 # - Exact Match
@@ -436,42 +454,11 @@ class TafGenerator:
             curr_dt += datetime.timedelta(hours=1)
             
         # --- Hysteresis for VRB ---
-        # Enter VRB: wspd <= 3 for >= 2 consecutive hours
-        # Exit VRB: wspd >= 5 for >= 2 consecutive hours
-        # Initialize State (assume Directional start, or check first few?)
-        # To be safe and strict, we start Directional and let the counter build up.
+        # Reverted: Use simple state from timeline (calculated per hour)
+        # The 'is_vrb' flag in each timeline entry is already calculated based on 
+        # the rule: Speed(t) <= 3 AND Speed(t+1) <= 3. 
+        # We will trust that directly instead of the 2-hour state machine.
         
-        current_state_vrb = False
-        count_le_3 = 0
-        count_ge_5 = 0
-        
-        for i in range(len(timeline)):
-            wspd = timeline[i]['wspd']
-            
-            # Track counts
-            if wspd <= 3:
-                count_le_3 += 1
-            else:
-                count_le_3 = 0
-                
-            if wspd >= 5:
-                count_ge_5 += 1
-            else:
-                count_ge_5 = 0
-                
-            # State Transitions
-            if not current_state_vrb:
-                # Attempt to Enter VRB
-                if count_le_3 >= 2:
-                    current_state_vrb = True
-            else:
-                # Attempt to Exit VRB
-                if count_ge_5 >= 2:
-                    current_state_vrb = False
-            
-            # Apply State
-            timeline[i]['is_vrb'] = current_state_vrb
-
         return timeline
 
     def _consolidate_tempo_groups(self, timeline):
@@ -764,7 +751,9 @@ class TafGenerator:
             # 1. Wind Change
             diff_dir = abs(state['wdir'] - curr_wdir)
             if diff_dir > 180: diff_dir = 360 - diff_dir
-            dir_significant = (diff_dir >= 60) # User strict rule: Just check deviation > 60
+            
+            # Standard thresholds (Reverted from Light Wind Filter)
+            dir_significant = (diff_dir >= 60)
             spd_significant = (abs(state['wspd'] - curr_wspd) >= 10)
             
             # VRB Change Check

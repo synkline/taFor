@@ -207,9 +207,12 @@ class IMDScraper:
             "VAJJ": "tafstnmum.html",
             "VAKP": "tafstnmum.html",
             # Chennai MWO (As per user request)
-            "VOLT": "tafstnche.html", 
-            "VOSR": "tafstnche.html", 
-            "VOND": "tafstnche.html" 
+            "VOLT": "tafstnchen.html", 
+            "LATUR": "tafstnchen.html",
+            "VOSR": "tafstnchen.html", 
+            "SINDHUDURG": "tafstnchen.html",
+            "VOND": "tafstnchen.html",
+            "NANDED": "tafstnchen.html" 
         }
         
         start_page = station_mwo_map.get(station, "tafstndel.html")
@@ -238,15 +241,28 @@ class IMDScraper:
 
             soup = BeautifulSoup(response.content, 'lxml')
             
+            # Mapping for Station Names if Code fails
+            name_map = {
+                "VOLT": "LATUR",
+                "VOSR": "SINDHUDURG",
+                "VOND": "NANDED"
+            }
+            station_name = name_map.get(station, "")
+            
             # A. Check for Station in Dropdown
             select = soup.find('select', attrs={'name': 'ac'})
             target_value = None
             if select:
                 for opt in select.find_all('option'):
                     txt = opt.get_text(strip=True).upper()
-                    val = opt.get('value')
-                    if station in txt or station in val.upper():
-                        target_value = val
+                    val = opt.get('value').upper()
+                    
+                    # Match Logic: Code in Value OR Name in Text
+                    match_code = (station in val)
+                    match_name = (station_name and station_name in txt)
+                    
+                    if match_code or match_name:
+                        target_value = opt.get('value') # Keep original case for submission
                         break
             
             if target_value:
