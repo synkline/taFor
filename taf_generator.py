@@ -418,21 +418,29 @@ class TafGenerator:
                 wgust = float(g_str or 0)
                 wdir = float(d_str or 0)
                 
-                # VRB Check: Speed(t) <= 3 AND Speed(t+1) <= 3
-                # We need next hour's speed.
+                # VRB Hysteresis Logic
+                # Requires sustained low wind to enter VRB, and sustained higher wind to exit.
+                # 'next_dt' and 'next_entry' are already available from rain calculations
+                s_next = 999
+                next_entry = data_map.get(next_dt)
+                if next_entry:
+                    s_next = float(next_entry.get('WS', '0'))
                 
-                # Default assume false if end of data
-                is_vrb_condition = False
+                # If no next entry, assume it stays the same
+                if s_next == 999: s_next = wspd
+
+                enter_vrb = (wspd <= 3 and s_next <= 3)
+                exit_vrb = (wspd >= 5 and s_next >= 5)
                 
-                # Check current speed
-                if wspd <= 3:
-                    # Check next speed
-                    # We already have next_dt from rain calc
-                    next_entry = data_map.get(next_dt)
-                    if next_entry:
-                        s_next = float(next_entry.get('WS', '0'))
-                        if s_next <= 3:
-                            is_vrb_condition = True
+                # Fetch previous state from timeline (if exists)
+                prev_is_vrb = False
+                if timeline:
+                    prev_is_vrb = timeline[-1].get('is_vrb', False)
+
+                if prev_is_vrb:
+                    is_vrb_condition = not exit_vrb
+                else:
+                    is_vrb_condition = enter_vrb
                 
                 state = {
                     'dt': curr_dt,
@@ -706,6 +714,12 @@ class TafGenerator:
             # VRB Change Check
             vrb_chg = (state['is_vrb'] != curr_is_vrb)
             
+            # --- VRB CONSOLIDATION RULE ---
+            # If wind was VRB and remains VRB, ignore underlying direction/speed shifts
+            if curr_is_vrb and state['is_vrb']:
+                dir_significant = False
+                spd_significant = False
+            
             wind_chg = dir_significant or spd_significant or vrb_chg
             
             # 2. Vis Change
@@ -732,8 +746,9 @@ class TafGenerator:
                     wind_consistent = (d_diff_next < 60) and (abs(state['wspd'] - next_state['wspd']) < 10)
                     
                     # Check VRB consistency
-                    vrb_consistent = (state['is_vrb'] == next_state['is_vrb'])
-                    if vrb_chg and not vrb_consistent: is_transient = True
+                # Note: VRB is often significant even if transient, so we don't mark it transient here.
+                # vrb_consistent = (state['is_vrb'] == next_state['is_vrb'])
+                # if vrb_chg and not vrb_consistent: is_transient = True
                     
                     vis_consistent = not self._check_vis_limit_change(state['vis'], next_state['vis'])
                     cloud_consistent = (state['clouds'] == next_state['clouds'])
@@ -760,6 +775,10 @@ class TafGenerator:
                     n_cld = (next_s['clouds'] != target_state['clouds'])
                     n_vrb = (next_s['is_vrb'] != target_state['is_vrb'])
                     
+                    # --- VRB CONSOLIDATION RULE ---
+                    if target_state['is_vrb'] and next_s['is_vrb']:
+                        n_wind = False
+                        
                     if n_wind or n_vis or n_cld or n_wx or n_vrb:
                         target_state = next_s
                         
@@ -855,6 +874,12 @@ class TafGenerator:
             dir_significant = (diff_dir >= 60)
             spd_significant = (abs(state['wspd'] - curr_wspd) >= 10)
             vrb_chg = (state['is_vrb'] != curr_is_vrb)
+            
+            # --- VRB CONSOLIDATION RULE ---
+            if curr_is_vrb and state['is_vrb']:
+                dir_significant = False
+                spd_significant = False
+                
             wind_chg = dir_significant or spd_significant or vrb_chg
             vis_chg = self._check_vis_limit_change(curr_vis, state['vis'])
             cloud_chg = (state['clouds'] != curr_clouds)
@@ -869,6 +894,11 @@ class TafGenerator:
                     n_vis = self._check_vis_limit_change(target_state['vis'], next_s['vis'])
                     n_cld = (next_s['clouds'] != target_state['clouds'])
                     n_vrb = (next_s['is_vrb'] != target_state['is_vrb'])
+                    
+                    # --- VRB CONSOLIDATION RULE ---
+                    if target_state['is_vrb'] and next_s['is_vrb']:
+                        n_wind = False
+                        
                     if n_wind or n_vis or n_cld or n_vrb: target_state = next_s
                     check_ahead += 1
                 
