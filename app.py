@@ -2,6 +2,8 @@ from flask import Flask, render_template, request, redirect, url_for, flash
 import os
 from scraper import IMDScraper, OgimetScraper
 from taf_generator import TafGenerator
+from cleanup import run_automated_cleanup
+import threading
 
 app = Flask(__name__)
 app.secret_key = 'super_secret_taf_key'  
@@ -12,27 +14,25 @@ def index():
 
 @app.route('/generate', methods=['POST'])
 def generate():
+                                                            
+    threading.Thread(target=run_automated_cleanup, daemon=True).start()
+
     station = request.form.get('station', 'VABB').upper()
     
-    # initialize the scrapers
     imd_scraper = IMDScraper()
     ogimet_scraper = OgimetScraper()
     generator = TafGenerator()
 
-    # fetch data from IMD and Ogimet
-    # IMD
     imd_data = imd_scraper.fetch_data(station)
     
-    # Ogimet
     ogimet_data = ogimet_scraper.fetch_data(station)
 
-    # checking for critical errors (server blocking TAF generation requests)   
     error_msg = None
     debug_forms = None
     
     if "error" in imd_data:
         error_msg = f"IMD Error: {imd_data['error']}"
-        debug_forms = imd_data.get('debug_forms', None) # to get debug forms if available
+        debug_forms = imd_data.get('debug_forms', None)                                  
         if debug_forms:
             print("\n[DEBUG info for Developer]")
             print(str(debug_forms))
@@ -57,7 +57,6 @@ def generate():
                          debug_forms=debug_forms,
                          last_station=station)
 
-
 if __name__ == '__main__':
-    # start app in debug mode to get more info during dev process
+                                                                 
     app.run(debug=True, port=5000)

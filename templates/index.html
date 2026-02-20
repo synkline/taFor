@@ -231,15 +231,41 @@
         <script>
             function copyToClipboard(elementId, btnElement) {
                 const text = document.getElementById(elementId).innerText;
-                navigator.clipboard.writeText(text).then(() => {
+
+                const successCallback = () => {
                     const originalText = btnElement.innerText;
                     btnElement.innerText = "copied!";
                     setTimeout(() => {
                         btnElement.innerText = originalText;
                     }, 2000);
-                }).catch(err => {
-                    console.error('Failed to copy: ', err);
-                });
+                };
+
+                // Try modern API first
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(text).then(successCallback).catch(err => {
+                        console.error('Failed to copy: ', err);
+                    });
+                } 
+                // fallback for HTTP
+                else {
+                    const textarea = document.createElement("textarea");
+                    textarea.value = text;
+                    textarea.style.position = "fixed";
+                    textarea.style.left = "-999999px";
+                    textarea.style.top = "-999999px";
+                    document.body.appendChild(textarea);
+                    textarea.focus();
+                    textarea.select();
+                    
+                    try {
+                        document.execCommand("copy");
+                        successCallback();
+                    } catch (err) {
+                        console.error('Fallback copy failed: ', err);
+                    }
+                    
+                    textarea.remove();
+                }
             }
 
             function enableEdit(elementId) {

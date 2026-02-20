@@ -13,24 +13,20 @@ def main():
     ogimet_scraper = OgimetScraper()
     generator = TafGenerator()
 
-    # Fetch Data
     print("\n--- Fetching Data ---")
     
-    # 1. IMD
     imd_data = imd_scraper.fetch_data(station)
     if "error" in imd_data:
         print(f"Error fetching IMD Data: {imd_data['error']}")
         input("Press Enter to exit...")
         sys.exit(1)
 
-    # 2. Ogimet
     ogimet_data = ogimet_scraper.fetch_data(station)
     if "error" in ogimet_data:
         print(f"Error fetching Ogimet Data: {ogimet_data['error']}")
         input("Press Enter to exit...")
         sys.exit(1)
 
-    # Generate TAFs
     print("\n--- Generated TAFs ---")
     
     try:
