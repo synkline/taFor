@@ -461,250 +461,197 @@ class TafGenerator:
         
         return timeline
 
-    def _consolidate_tempo_groups(self, timeline):
+    def _consolidate_tempo_groups(self, timeline, prevailing_plan=None):
         """
         Finds continuous blocks of Gust >= 17 and creates merged TEMPO groups.
-        Rules:
-        - Max Validity: 4 Hours
-        - Gust Calculation: Gust = Wspd + 10 (Derived from MAX speed in the block)
-        Returns: Tuple (list of strings, set of masked datetimes)
+        - Rules: Max 4 Hours, Gust = Wspd + 10
+        - Cross-Check: Skips if redundant with prevailing_plan.
         """
         groups = []
         masked_times = set()
-        
         if not timeline: return groups, masked_times
+        if prevailing_plan is None: prevailing_plan = {}
         
+        # --- 1. GUST TEMPOS ---
         i = 0
         while i < len(timeline):
-            start_state = timeline[i]
-            
-            # Check Start Condition: Gust >= 17
-            if start_state['wgust'] >= 17:
-                # 1. Identify the full continuous block first
+            state = timeline[i]
+            if state['wgust'] >= 17:
+                # 1. Block detection
                 j = i + 1
-                
-                # Look ahead for continuity (break if gust < 17)
                 while j < len(timeline):
-                    next_state = timeline[j]
-                    if next_state['wgust'] < 17:
-                        break
+                    if timeline[j]['wgust'] < 17: break
                     j += 1
-                
                 block_start_idx = i
-                block_end_idx = j # Exclusive
+                block_end_idx = j
                 
-                # 2. Iterate through this block and split into max 4h chunks (Strict Rule 4h)
+                # 2. Chunking
                 curr_idx = block_start_idx
                 while curr_idx < block_end_idx:
                     chunk_end_idx = min(curr_idx + 4, block_end_idx)
                     
-                    # Analyze Chunk - Find MAX SPEED to drive the calculation
+                    # Analyze Chunk
                     chunk_max_ws = 0
                     for k in range(curr_idx, chunk_end_idx):
                         if timeline[k]['wspd'] > chunk_max_ws: chunk_max_ws = timeline[k]['wspd']
                     
-                    # Calculate per User Rule: Gust = Speed + 10
-                    # "If wgust >= 17 ... Read wspd ... wgust = wspd+10"
                     reported_spd = chunk_max_ws
                     reported_gust = reported_spd + 10
                     
-                    # Define Time Range
+                    # --- REDUNDANCY CHECK (WIND) ---
+                    # If prevailing wind is already gusty and at similar speeds, skip.
+                    p_state = prevailing_plan.get(timeline[curr_idx]['dt'], {})
+                    if p_state.get('wspd', 0) >= 15 or float(p_state.get('wgust', 0)) >= 17:
+                        # Redundant if prevailing is already 'high wind'
+                        curr_idx = chunk_end_idx
+                        continue
+
                     s_dt = timeline[curr_idx]['dt']
-                    # Last item index is chunk_end_idx - 1. End validity is +1 hour from that.
                     e_dt = timeline[chunk_end_idx - 1]['dt'] + datetime.timedelta(hours=1)
+                    while s_dt < e_dt:
+                        masked_times.add(s_dt)
+                        s_dt += datetime.timedelta(hours=1)
                     
-                    # Update Mask (Suppress BECMG for these hours)
-                    mask_cursor = s_dt
-                    while mask_cursor < e_dt:
-                        masked_times.add(mask_cursor)
-                        mask_cursor += datetime.timedelta(hours=1)
-                        
-                    # Format
+                    s_dt = timeline[curr_idx]['dt'] # reset
                     s_str = f"{s_dt.day:02d}{s_dt.hour:02d}"
                     e_str = f"{e_dt.day:02d}{e_dt.hour:02d}"
-                    
-                    # Use Direction from Start of Chunk (or maybe avg?)
                     d_val = timeline[curr_idx]['wdir'] 
                     d_fmt = self._round_to_nearest_10(d_val)
                     if d_fmt == "000" and reported_spd > 0: d_fmt = "360"
                     
-                    # Format String: D(Speed)G(Speed+10)KT
                     wind_str = f"{d_fmt}{int(reported_spd):02d}G{int(reported_gust):02d}KT"
-                    
-                    tempo_str = f"TEMPO {s_str}/{e_str} {wind_str}"
-                    groups.append(tempo_str)
-                    
-                    # Move cursor
+                    groups.append(f"TEMPO {s_str}/{e_str} {wind_str}")
                     curr_idx = chunk_end_idx
-                
-                # Resume main loop after this entire block
                 i = block_end_idx 
             else:
                 i += 1
         
-        # --- RAIN TEMPO LOGIC (Separate Pass) ---
-        # Rule: If rain > 50mm, Add "TEMPO HH/HH 1500 +RA +SHRA" (6hr validity)
-        # --- RAIN TEMPO LOGIC (Separate Pass) ---
-        # Rule: If rain > 50mm, Add "TEMPO HH/HH ... " (6hr validity)
-        # We process this similarly to Wind, detecting continuous blocks > 50mm.
+        # --- 2. RAIN TEMPOS ---
         i = 0
         while i < len(timeline):
             state = timeline[i]
-            # Use 3-hourly accumulated rain from state
-            rain_val = state.get('rain_3hr', 0.0)
-            
-            if rain_val > 50:
-                # 1. Identify valid block
+            if state.get('rain_3hr', 0.0) > 50:
                 j = i + 1
                 while j < len(timeline):
-                    next_r = timeline[j].get('rain_3hr', 0.0)
-                    if next_r <= 50:
-                        break
+                    if timeline[j].get('rain_3hr', 0.0) <= 50: break
                     j += 1
-                
                 block_start = i
                 block_end = j
-                
-                # 2. Process block in 6h chunks
                 curr = block_start
                 while curr < block_end:
                     chunk_end = min(curr + 6, block_end)
                     
+                    # --- REDUNDANCY CHECK (RAIN) ---
+                    p_state = prevailing_plan.get(timeline[curr]['dt'], {})
+                    p_wx = p_state.get('wx', '')
+                    if "+RA" in p_wx:
+                         # Already prevailing heavy rain
+                         curr = chunk_end
+                         continue
+
                     s_dt = timeline[curr]['dt']
                     e_dt_validity = timeline[chunk_end - 1]['dt'] + datetime.timedelta(hours=1)
-                    
                     s_str = f"{s_dt.day:02d}{s_dt.hour:02d}"
                     e_str = f"{e_dt_validity.day:02d}{e_dt_validity.hour:02d}"
                     
-                    # Determine conditions for the TEMPO
-                    # User request: "TEMPO to/from vis +RA +SHRA"
-                    # We need 'vis'. Let's pick the minimum visibility in this chunk.
-                    min_vis_val = 9999
                     min_vis_str = "9999"
-                    
+                    min_v_val = 9999
                     for k in range(curr, chunk_end):
-                        v_str = timeline[k]['vis']
                         try:
-                            v_int = int(v_str)
-                            if v_int < min_vis_val:
-                                min_vis_val = v_int
-                                min_vis_str = v_str
-                        except:
-                            pass
+                            v = int(timeline[k]['vis'])
+                            if v < min_v_val: 
+                                min_v_val = v
+                                min_vis_str = timeline[k]['vis']
+                        except: pass
                             
-                    # Format
-                    tempo_str = f"TEMPO {s_str}/{e_str} {min_vis_str} +RA +SHRA"
-                    groups.append(tempo_str)
-                    
+                    groups.append(f"TEMPO {s_str}/{e_str} {min_vis_str} +RA +SHRA")
                     curr = chunk_end
-                
-                # Advance main loop
                 i = block_end
             else:
                 i += 1
 
-        # --- VISIBILITY TEMPO LOGIC (Separate Pass) ---
-        # Rule: If Vis <= 1500m for >= 2 consecutive hours, Add "TEMPO HH/HH [min_vis] [valid_wx]"
-        # Max Validity: 4 Hours
-        
+        # --- 3. VISIBILITY TEMPOS ---
         i = 0
         while i < len(timeline):
             state = timeline[i]
-            
-            # Skip if already covered by Wind/Rain TEMPO
             if state['dt'] in masked_times:
                 i += 1
                 continue
-                
-            try:
-                vis_val = int(state['vis'])
-            except:
-                vis_val = 9999
+            try: vis_val = int(state['vis'])
+            except: vis_val = 9999
             
             if vis_val <= 1500:
-                # 1. Check for Continuity (>= 2 hours required)
-                # Look ahead
                 j = i + 1
-                consecutive_count = 1
-                
-                # Scan block of low vis
                 while j < len(timeline):
-                    # Break on gap or masked time
-                    next_dt = timeline[j]['dt']
-                    if next_dt in masked_times:
-                        break
-                        
-                    try:
-                        next_v = int(timeline[j]['vis'])
-                    except:
-                        next_v = 9999
-                        
-                    if next_v > 1500:
-                        break
-                        
-                    consecutive_count += 1
+                    if timeline[j]['dt'] in masked_times: break
+                    try: next_v = int(timeline[j]['vis'])
+                    except: next_v = 9999
+                    if next_v > 1500: break
                     j += 1
                 
-                if consecutive_count >= 2:
+                if (j - i) >= 2:
                     block_start = i
                     block_end = j
-                    
-                    # Process block in 4h chunks
                     curr = block_start
                     while curr < block_end:
                         chunk_end = min(curr + 4, block_end)
                         
-                        s_dt = timeline[curr]['dt']
-                        e_dt_validity = timeline[chunk_end - 1]['dt'] + datetime.timedelta(hours=1)
-                        
-                        s_str = f"{s_dt.day:02d}{s_dt.hour:02d}"
-                        e_str = f"{e_dt_validity.day:02d}{e_dt_validity.hour:02d}"
-                        
                         # Determine conditions
-                        min_vis_val = 9999
                         min_vis_str = "9999"
-                        
-                        # Wx Collection
+                        min_v_val = 9999
                         wx_set = set()
-                        
                         for k in range(curr, chunk_end):
-                            v_str = timeline[k]['vis']
                             try:
-                                v_int = int(v_str)
-                                if v_int < min_vis_val:
-                                    min_vis_val = v_int
-                                    min_vis_str = v_str
-                            except:
-                                pass
-                            
+                                v = int(timeline[k]['vis'])
+                                if v < min_v_val:
+                                    min_v_val = v
+                                    min_vis_str = timeline[k]['vis']
+                            except: pass
                             w_k = timeline[k]['wx']
                             if w_k:
                                 for code in w_k.split():
-                                    if code not in ["NSW", ""]:
-                                        wx_set.add(code)
+                                    if code not in ["NSW", ""]: wx_set.add(code)
                         
-                        # Sort Wx
+                        # --- REDUNDANCY & REVERSION CHECK (PLAN BASED) ---
+                        # 1. Redundant: If prevailing state already has this vis
+                        # 2. Reversion: Check against block end (Entire block must revert)
+                        
+                        is_invalid = False
+                        
+                        # PLAN REDUNDANCY CHECK
+                        p_state = prevailing_plan.get(timeline[curr]['dt'], {})
+                        if p_state.get('vis') == min_vis_str:
+                            is_invalid = True
+                        
+                        # BLOCK REVERSION CHECK (Must return to something else after the whole block)
+                        if not is_invalid and block_end < len(timeline):
+                            after_state = timeline[block_end]
+                            if after_state['vis'] == min_vis_str:
+                                is_invalid = True
+                        
+                        if is_invalid:
+                            curr = chunk_end
+                            # If the whole block is persistent or redundant, we can skip it
+                            # But we only mark i = block_end at the outer loop.
+                            continue
+
+                        s_dt = timeline[curr]['dt']
+                        e_dt_validity = timeline[chunk_end - 1]['dt'] + datetime.timedelta(hours=1)
+                        s_str = f"{s_dt.day:02d}{s_dt.hour:02d}"
+                        e_str = f"{e_dt_validity.day:02d}{e_dt_validity.hour:02d}"
                         wx_list = sorted(list(wx_set))
                         wx_str = " ".join(wx_list)
                         
-                        # Update Mask
                         mask_cursor = s_dt
                         while mask_cursor < e_dt_validity:
                             masked_times.add(mask_cursor)
                             mask_cursor += datetime.timedelta(hours=1)
                         
-                        # Format
-                        tempo_str = f"TEMPO {s_str}/{e_str} {min_vis_str} {wx_str}".strip()
-                        groups.append(tempo_str)
-                        
+                        groups.append(f"TEMPO {s_str}/{e_str} {min_vis_str} {wx_str}".strip())
                         curr = chunk_end
-                    
                     i = block_end
-                else:
-                    # Not enough duration
-                    i += 1
-            else:
-                i += 1
+                else: i += 1
+            else: i += 1
 
         return groups, masked_times
 
@@ -842,7 +789,7 @@ class TafGenerator:
                 if target_state['wx']:
                     out_parts.append(target_state['wx'])
                 elif curr_wx and not target_state['wx']:
-                     out_parts.append("NSW")
+                    out_parts.append("NSW")
                 
                 # 4. Clouds
                 out_parts.append(target_state['clouds'])
@@ -866,6 +813,105 @@ class TafGenerator:
             i += 1
             
         return groups
+
+    def _build_prevailing_plan(self, timeline, init_vis, init_clouds, init_wx, init_wind_obj):
+        """
+        Calculates the prevailing state at every hour of the timeline.
+        This captures the transitions (BECMGs) so TEMPO logic knows the hourly baseline.
+        """
+        plan = {}
+        if not timeline: return plan
+        
+        # Initial State
+        curr_state = {
+            'vis': init_vis,
+            'clouds': init_clouds,
+            'wx': init_wx,
+            'wdir': init_wind_obj['d'],
+            'wspd': init_wind_obj['s'],
+            'is_vrb': init_wind_obj.get('is_vrb', False)
+        }
+        
+        # Populate hour 0 (the 'init' state before the loop starts)
+        # Note: timeline passed to _generate_change_groups starts from [1:]
+        # but for plan we want the whole period.
+        
+        # The logic follows _generate_change_groups exactly
+        curr_vis = init_vis
+        curr_clouds = init_clouds
+        curr_wx = init_wx
+        curr_wdir = init_wind_obj['d']
+        curr_wspd = init_wind_obj['s']
+        curr_is_vrb = init_wind_obj.get('is_vrb', False)
+        
+        i = 0
+        while i < len(timeline):
+            state = timeline[i]
+            
+            # Change Detection Logic (identical to _generate_change_groups)
+            diff_dir = abs(state['wdir'] - curr_wdir)
+            if diff_dir > 180: diff_dir = 360 - diff_dir
+            
+            dir_significant = (diff_dir >= 60)
+            spd_significant = (abs(state['wspd'] - curr_wspd) >= 10)
+            vrb_chg = (state['is_vrb'] != curr_is_vrb)
+            wind_chg = dir_significant or spd_significant or vrb_chg
+            vis_chg = self._check_vis_limit_change(curr_vis, state['vis'])
+            cloud_chg = (state['clouds'] != curr_clouds)
+            
+            if wind_chg or vis_chg or cloud_chg:
+                # Smoothing/Lookahead logic to find target_state
+                target_state = state
+                check_ahead = 1
+                while check_ahead <= 2 and (i + check_ahead) < len(timeline):
+                    next_s = timeline[i + check_ahead]
+                    n_wind = (abs(next_s['wdir'] - target_state['wdir']) >= 60) 
+                    n_vis = self._check_vis_limit_change(target_state['vis'], next_s['vis'])
+                    n_cld = (next_s['clouds'] != target_state['clouds'])
+                    n_vrb = (next_s['is_vrb'] != target_state['is_vrb'])
+                    if n_wind or n_vis or n_cld or n_vrb: target_state = next_s
+                    check_ahead += 1
+                
+                # Update current state to the target
+                curr_vis = target_state['vis']
+                curr_clouds = target_state['clouds']
+                curr_wx = target_state['wx']
+                curr_wdir = target_state['wdir']
+                curr_wspd = target_state['wspd']
+                curr_is_vrb = target_state['is_vrb']
+                
+                steps_to_jump = timeline.index(target_state) - i
+                
+                # Fill the hours until target is reached
+                # Technically BECMG is a transition, but we treat it as shifting to target.
+                # Here we map every hour to the current prevailing state.
+                # From 'i' forward, the new state is established.
+                for k in range(i, len(timeline)):
+                    plan[timeline[k]['dt']] = {
+                        'vis': curr_vis,
+                        'clouds': curr_clouds,
+                        'wx': curr_wx,
+                        'wdir': curr_wdir,
+                        'wspd': curr_wspd,
+                        'is_vrb': curr_is_vrb
+                    }
+                
+                i += (1 + steps_to_jump)
+                continue
+            
+            # If no change, record current prevailing state for this hour
+            if timeline[i]['dt'] not in plan:
+                plan[timeline[i]['dt']] = {
+                    'vis': curr_vis,
+                    'clouds': curr_clouds,
+                    'wx': curr_wx,
+                    'wdir': curr_wdir,
+                    'wspd': curr_wspd,
+                    'is_vrb': curr_is_vrb
+                }
+            i += 1
+            
+        return plan
 
     def _get_group_sort_key(self, group_str, issue_dt):
         """
@@ -924,8 +970,11 @@ class TafGenerator:
         # Need distinct init objects for tracking
         init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'is_vrb': base['is_vrb']}
         
-        # Determine TEMPOs first and get mask
-        tempo_groups, masked_times = self._consolidate_tempo_groups(timeline)
+        # Determine Prevailing Plan First
+        prevailing_plan = self._build_prevailing_plan(timeline, base['vis'], base['clouds'], base['wx'], init_wind_obj)
+        
+        # Determine TEMPOs using the plan (for redundancy check)
+        tempo_groups, masked_times = self._consolidate_tempo_groups(timeline, prevailing_plan)
         
         # Pass slice [1:] to skip comparing base vs base, AND mask
         becmg_groups = self._generate_change_groups(timeline[1:], base['vis'], base['clouds'], base['wx'], init_wind_obj, masked_times)
@@ -959,7 +1008,11 @@ class TafGenerator:
         
         init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'is_vrb': base['is_vrb']}
         
-        tempo_groups, masked_times = self._consolidate_tempo_groups(timeline)
+        # Determine Prevailing Plan First
+        prevailing_plan = self._build_prevailing_plan(timeline, base['vis'], base['clouds'], base['wx'], init_wind_obj)
+        
+        # Determine TEMPOs using the plan
+        tempo_groups, masked_times = self._consolidate_tempo_groups(timeline, prevailing_plan)
         becmg_groups = self._generate_change_groups(timeline[1:], base['vis'], base['clouds'], base['wx'], init_wind_obj, masked_times)
         
         all_groups = becmg_groups + tempo_groups
