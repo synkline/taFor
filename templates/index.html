@@ -210,7 +210,7 @@
                 <h2>Long TAF <span id="long-taf-edited" class="edited-badge">EDITED</span></h2>
                 <div class="action-group">
                     <span class="action-link" onclick="enableEdit('long-taf')">edit</span>
-                    <span class="action-link" onclick="generatePDF('long-taf', 'Long_TAF')">.pdf</span>
+                    <span class="action-link" onclick="generateCombinedPDF()">.pdf</span>
                     <span class="action-link" onclick="copyToClipboard('long-taf', this)">copy</span>
                 </div>
             </div>
@@ -220,7 +220,6 @@
                 <h2>Short TAF <span id="short-taf-edited" class="edited-badge">EDITED</span></h2>
                 <div class="action-group">
                     <span class="action-link" onclick="enableEdit('short-taf')">edit</span>
-                    <span class="action-link" onclick="generatePDF('short-taf', 'Short_TAF')">.pdf</span>
                     <span class="action-link" onclick="copyToClipboard('short-taf', this)">copy</span>
                 </div>
             </div>
@@ -331,24 +330,26 @@
                 }
             }
 
-            function generatePDF(elementId, filenamePrefix) {
+            function generateCombinedPDF() {
                 const { jsPDF } = window.jspdf;
                 const doc = new jsPDF();
 
-                const content = document.getElementById(elementId).innerText;
+                const longContent = document.getElementById('long-taf').innerText;
+                const shortContent = document.getElementById('short-taf').innerText;
                 const station = document.getElementById('station').value || 'STATION';
 
                 // Extract Issue Time (DDHHMMZ)
-                const timeStr = content.match(/\d{6}Z/);
+                const timeStr = longContent.match(/\d{6}Z/);
                 const timeSuffix = timeStr ? `_${timeStr[0]}` : '';
 
                 doc.setFont("monospace"); // Use monospace for TAF
                 doc.setFontSize(12);
 
-                const lines = doc.splitTextToSize(content, 180);
+                const combinedContent = "Long TAF:\n" + longContent + "\n\nShort TAF:\n" + shortContent;
+                const lines = doc.splitTextToSize(combinedContent, 180);
 
                 doc.text(lines, 10, 10);
-                doc.save(`${station}_${filenamePrefix}${timeSuffix}.pdf`);
+                doc.save(`${station}_Combined_TAF${timeSuffix}.pdf`);
             }
         </script>
 
