@@ -187,8 +187,8 @@ class IMDScraper:
             "VAJJ": "tafstnmum.html",
             "VAKP": "tafstnmum.html",
                                                
-            "VOLT": "tafstnchen.html", 
-            "LATUR": "tafstnchen.html",
+            "VOGA": "tafstnchen.html", 
+            "GOA": "tafstnchen.html",
             "VOSR": "tafstnchen.html", 
             "SINDHUDURG": "tafstnchen.html",
             "VOND": "tafstnchen.html",
@@ -222,7 +222,7 @@ class IMDScraper:
             soup = BeautifulSoup(response.content, 'lxml')
             
             name_map = {
-                "VOLT": "LATUR",
+                "VOGA": "GOA",
                 "VOSR": "SINDHUDURG",
                 "VOND": "NANDED"
             }
