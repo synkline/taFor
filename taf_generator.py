@@ -46,9 +46,10 @@ class TafGenerator:
         except (ValueError, TypeError):
             return "000"
 
-    def _format_wind(self, d_str, s_str, g_str="0", is_vrb=None):
+    def _format_wind(self, d_str, s_str, g_str="0", is_vrb=None, valid_gust=False):
         """
         standard wind formatting
+        Gust is included only when valid_gust is True (ICAO: gust-wspd >= 10, gust >= 17, wspd >= 8)
         """
         try:
             d = float(d_str or 0)
@@ -73,15 +74,13 @@ class TafGenerator:
                 is_variable = True
                 
             if is_variable:
-                if g >= 10:
+                if valid_gust:
                      return f"VRB{int(s):02d}G{int(g):02d}KT"
                 else:
                      return f"VRB{int(s):02d}KT"
             
-            if s >= 15 or g >= 17:
-                avg_val = int(g - 10)
-                if avg_val < 0: avg_val = int(s)
-                return f"{d_fmt}{avg_val:02d}G{int(g):02d}KT"
+            if valid_gust:
+                return f"{d_fmt}{int(s):02d}G{int(g):02d}KT"
             else:
                 return f"{d_fmt}{int(s):02d}KT"
                 
@@ -172,14 +171,6 @@ class TafGenerator:
                              final_vis = v_hist
                              vis_found = True
                 
-                if not vis_found:
-                    target_hist_48 = forecast_dt - datetime.timedelta(hours=48)
-                    hist_metar_48 = self._find_matching_metar(target_hist_48, history)
-                    if hist_metar_48:
-                        v_hist = hist_metar_48.get('visibility_raw')
-                        if v_hist and v_hist != 'N/A':
-                             final_vis = v_hist
-
             if lcb == 0 and ccb == 0:
                 cloud_str = "NSC"
             else:
@@ -202,13 +193,7 @@ class TafGenerator:
                             if c_raw and c_raw != 'N/A' and c_raw != 'NSC':
                                 persisted_clouds = c_raw
                     
-                    if not persisted_clouds:
-                        target_hist_48 = forecast_dt - datetime.timedelta(hours=48)
-                        hist_metar_48 = self._find_matching_metar(target_hist_48, history)
-                        if hist_metar_48:
-                            c_raw = hist_metar_48.get('clouds_raw')
-                            if c_raw and c_raw != 'N/A' and c_raw != 'NSC':
-                                persisted_clouds = c_raw
+
                 
                 if persisted_clouds:
                     cloud_str = persisted_clouds
@@ -401,11 +386,14 @@ class TafGenerator:
                 else:
                     is_vrb_condition = enter_vrb
                 
+                valid_gust = (wgust - wspd) >= 10 and wgust >= 17 and wspd >= 8
+                
                 state = {
                     'dt': curr_dt,
                     'wdir': wdir,
                     'wspd': wspd,
                     'wgust': wgust,
+                    'valid_gust': valid_gust,
                     'vis': p_vis,
                     'wx': p_wx,
                     'clouds': p_clouds,
@@ -431,52 +419,43 @@ class TafGenerator:
         if not timeline: return groups, masked_times
         if prevailing_plan is None: prevailing_plan = {}
         
+        # --- Gust TEMPO (ICAO: isolated spikes only) ---
+        # Build gust blocks: consecutive hours where valid_gust is True
         i = 0
         while i < len(timeline):
-            state = timeline[i]
-            if state['wgust'] >= 17:
-                                    
-                j = i + 1
-                while j < len(timeline):
-                    if timeline[j]['wgust'] < 17: break
-                    j += 1
-                block_start_idx = i
-                block_end_idx = j
-                
-                curr_idx = block_start_idx
-                while curr_idx < block_end_idx:
-                    chunk_end_idx = min(curr_idx + 4, block_end_idx)
-                    
-                    chunk_max_ws = 0
-                    for k in range(curr_idx, chunk_end_idx):
-                        if timeline[k]['wspd'] > chunk_max_ws: chunk_max_ws = timeline[k]['wspd']
-                    
-                    reported_spd = chunk_max_ws
-                    reported_gust = reported_spd + 10
-                    
-                    p_state = prevailing_plan.get(timeline[curr_idx]['dt'], {})
-                    if p_state.get('wspd', 0) >= 15 or float(p_state.get('wgust', 0)) >= 17:
-                                                                        
-                        curr_idx = chunk_end_idx
-                        continue
+            if timeline[i].get('valid_gust', False):
+                start = i
+                while i < len(timeline) and timeline[i].get('valid_gust', False):
+                    i += 1
+                end = i  # exclusive
+                duration = end - start
 
-                    s_dt = timeline[curr_idx]['dt']
-                    e_dt = timeline[chunk_end_idx - 1]['dt'] + datetime.timedelta(hours=1)
-                    while s_dt < e_dt:
-                        masked_times.add(s_dt)
-                        s_dt += datetime.timedelta(hours=1)
-                    
-                    s_dt = timeline[curr_idx]['dt']        
-                    s_str = f"{s_dt.day:02d}{s_dt.hour:02d}"
-                    e_str = f"{e_dt.day:02d}{e_dt.hour:02d}"
-                    d_val = timeline[curr_idx]['wdir'] 
-                    d_fmt = self._round_to_nearest_10(d_val)
-                    if d_fmt == "000" and reported_spd > 0: d_fmt = "360"
-                    
-                    wind_str = f"{d_fmt}{int(reported_spd):02d}G{int(reported_gust):02d}KT"
-                    groups.append(f"TEMPO {s_str}/{e_str} {wind_str}")
-                    curr_idx = chunk_end_idx
-                i = block_end_idx 
+                if duration >= 3:
+                    # Persistent gust → prevailing, handled by BECMG/_format_wind
+                    continue
+
+                # duration < 3 → isolated spike → TEMPO
+                s_dt = timeline[start]['dt']
+                e_dt = s_dt + datetime.timedelta(hours=duration)
+                s_str = f"{s_dt.day:02d}{s_dt.hour:02d}"
+                e_str = f"{e_dt.day:02d}{e_dt.hour:02d}"
+
+                # Skip if already covered by prevailing plan
+                p_state = prevailing_plan.get(s_dt, {})
+                if p_state.get('valid_gust', False):
+                    continue
+
+                max_k = max(range(start, end), key=lambda k: timeline[k]['wgust'])
+                max_gust = timeline[max_k]['wgust']
+                max_spd = timeline[max_k]['wspd']
+                d_val = timeline[max_k]['wdir']
+                d_fmt = self._round_to_nearest_10(d_val)
+                if d_fmt == "000" and max_spd > 0: d_fmt = "360"
+
+                wind_str = f"{d_fmt}{int(max_spd):02d}G{int(max_gust):02d}KT"
+                groups.append(f"TEMPO {s_str}/{e_str} {wind_str}")
+                for k in range(start, end):
+                    masked_times.add(timeline[k]['dt'])
             else:
                 i += 1
         
@@ -613,6 +592,7 @@ class TafGenerator:
         curr_wdir = init_wind_obj['d']
         curr_wspd = init_wind_obj['s']
         curr_is_vrb = init_wind_obj.get('is_vrb', False)
+        curr_valid_gust = init_wind_obj.get('valid_gust', False)
         
         i = 0
         while i < len(timeline):
@@ -705,7 +685,7 @@ class TafGenerator:
                 
                 out_parts = [f"BECMG {start_str}/{end_str}"]
                 
-                out_parts.append(self._format_wind(target_state['wdir'], target_state['wspd'], target_state['wgust'], is_vrb=target_state['is_vrb']))
+                out_parts.append(self._format_wind(target_state['wdir'], target_state['wspd'], target_state['wgust'], is_vrb=target_state['is_vrb'], valid_gust=target_state.get('valid_gust', False)))
                 
                 out_parts.append(target_state['vis'])
                 
@@ -726,6 +706,7 @@ class TafGenerator:
                 curr_clouds = target_state['clouds']
                 curr_wx = target_state['wx']
                 curr_is_vrb = target_state['is_vrb']
+                curr_valid_gust = target_state.get('valid_gust', False)
                 
                 i += (1 + steps_to_skip)
                 continue
@@ -757,6 +738,7 @@ class TafGenerator:
         curr_wdir = init_wind_obj['d']
         curr_wspd = init_wind_obj['s']
         curr_is_vrb = init_wind_obj.get('is_vrb', False)
+        curr_valid_gust = init_wind_obj.get('valid_gust', False)
         
         i = 0
         while i < len(timeline):
@@ -800,6 +782,7 @@ class TafGenerator:
                 curr_wdir = target_state['wdir']
                 curr_wspd = target_state['wspd']
                 curr_is_vrb = target_state['is_vrb']
+                curr_valid_gust = target_state.get('valid_gust', False)
                 
                 steps_to_jump = timeline.index(target_state) - i
                 
@@ -810,7 +793,8 @@ class TafGenerator:
                         'wx': curr_wx,
                         'wdir': curr_wdir,
                         'wspd': curr_wspd,
-                        'is_vrb': curr_is_vrb
+                        'is_vrb': curr_is_vrb,
+                        'valid_gust': curr_valid_gust
                     }
                 
                 i += (1 + steps_to_jump)
@@ -823,7 +807,8 @@ class TafGenerator:
                     'wx': curr_wx,
                     'wdir': curr_wdir,
                     'wspd': curr_wspd,
-                    'is_vrb': curr_is_vrb
+                    'is_vrb': curr_is_vrb,
+                    'valid_gust': curr_valid_gust
                 }
             i += 1
             
@@ -871,11 +856,11 @@ class TafGenerator:
              return f"TAF {station} {issue_str} {validity} NIL"
 
         base = timeline[0]
-        init_wind = self._format_wind(base['wdir'], base['wspd'], base['wgust'], is_vrb=base['is_vrb'])
+        init_wind = self._format_wind(base['wdir'], base['wspd'], base['wgust'], is_vrb=base['is_vrb'], valid_gust=base.get('valid_gust', False))
         taf_body = f"{init_wind} {base['vis']} {base['wx']} {base['clouds']}".strip()
         taf_body = " ".join(taf_body.split())
         
-        init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'is_vrb': base['is_vrb']}
+        init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'is_vrb': base['is_vrb'], 'valid_gust': base.get('valid_gust', False)}
         
         prevailing_plan = self._build_prevailing_plan(timeline, base['vis'], base['clouds'], base['wx'], init_wind_obj)
         
@@ -905,11 +890,11 @@ class TafGenerator:
              return f"TAF {station} {issue_str} {validity} NIL"
 
         base = timeline[0]
-        init_wind = self._format_wind(base['wdir'], base['wspd'], base['wgust'], is_vrb=base['is_vrb'])
+        init_wind = self._format_wind(base['wdir'], base['wspd'], base['wgust'], is_vrb=base['is_vrb'], valid_gust=base.get('valid_gust', False))
         taf_body = f"{init_wind} {base['vis']} {base['wx']} {base['clouds']}".strip()
         taf_body = " ".join(taf_body.split())
         
-        init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'is_vrb': base['is_vrb']}
+        init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'is_vrb': base['is_vrb'], 'valid_gust': base.get('valid_gust', False)}
         
         prevailing_plan = self._build_prevailing_plan(timeline, base['vis'], base['clouds'], base['wx'], init_wind_obj)
         

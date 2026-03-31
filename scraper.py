@@ -222,7 +222,7 @@ class IMDScraper:
             soup = BeautifulSoup(response.content, 'lxml')
             
             name_map = {
-                "VOGA": "GOA",
+                "VOGA": "VOGA-GOA",
                 "VOSR": "SINDHUDURG",
                 "VOND": "NANDED"
             }
