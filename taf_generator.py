@@ -87,6 +87,35 @@ class TafGenerator:
         except Exception:
             return "00000KT"
 
+    def _is_speed_change_significant(self, old_spd, new_spd, old_gust=0, new_gust=0, old_valid_gust=False, new_valid_gust=False):
+        """
+        Evaluates whether a wind speed change is operationally significant.
+        Rules (evaluated in order, returns True on first match):
+          A: ICAO standard — abs delta >= 10 kt
+          B: Crossing up into strong wind — old < 10, new >= 10
+          C: Dying wind / calm — old >= 10, new <= 3
+          D: Leaving calm — old <= 2, new >= 8
+          E: Gust change — valid gust emerges/disappears, or magnitude shifts >= 10 kt
+        """
+        # Rule A
+        if abs(new_spd - old_spd) >= 10:
+            return True
+        # Rule B
+        if old_spd < 10 and new_spd >= 10:
+            return True
+        # Rule C
+        if old_spd >= 10 and new_spd <= 3:
+            return True
+        # Rule D
+        if old_spd <= 2 and new_spd >= 8:
+            return True
+        # Rule E
+        if old_valid_gust != new_valid_gust:
+            return True
+        if old_valid_gust and new_valid_gust and abs(new_gust - old_gust) >= 10:
+            return True
+        return False
+
     def _extract_historical_height(self, target_dt, history):
         """
         cloud height from METAR ~24 hours prior.
@@ -591,6 +620,7 @@ class TafGenerator:
         curr_wx = init_wx
         curr_wdir = init_wind_obj['d']
         curr_wspd = init_wind_obj['s']
+        curr_wgust = init_wind_obj.get('g', 0)
         curr_is_vrb = init_wind_obj.get('is_vrb', False)
         curr_valid_gust = init_wind_obj.get('valid_gust', False)
         
@@ -602,10 +632,12 @@ class TafGenerator:
                                                                         
                 curr_wdir = state['wdir']
                 curr_wspd = state['wspd']
+                curr_wgust = state['wgust']
                 curr_vis = state['vis']
                 curr_clouds = state['clouds']
                 curr_wx = state['wx']
                 curr_is_vrb = state['is_vrb']
+                curr_valid_gust = state.get('valid_gust', False)
                 i += 1
                 continue
             
@@ -614,8 +646,24 @@ class TafGenerator:
             diff_dir = abs(state['wdir'] - curr_wdir)
             if diff_dir > 180: diff_dir = 360 - diff_dir
             
-            dir_significant = (diff_dir >= 60)
-            spd_significant = (abs(state['wspd'] - curr_wspd) >= 10)
+            dir_significant = (diff_dir >= 60) and (state['wspd'] >= 5)
+            
+            spd_significant = self._is_speed_change_significant(
+                curr_wspd, state['wspd'],
+                old_gust=curr_wgust, new_gust=state['wgust'],
+                old_valid_gust=curr_valid_gust, new_valid_gust=state.get('valid_gust', False)
+            )
+            
+            # 2-hour persistence: speed change must hold for the next hour too
+            if spd_significant and i + 1 < len(timeline):
+                next_s = timeline[i + 1]
+                next_still_significant = self._is_speed_change_significant(
+                    curr_wspd, next_s['wspd'],
+                    old_gust=curr_wgust, new_gust=next_s['wgust'],
+                    old_valid_gust=curr_valid_gust, new_valid_gust=next_s.get('valid_gust', False)
+                )
+                if not next_still_significant:
+                    spd_significant = False
             
             vrb_chg = (state['is_vrb'] != curr_is_vrb)
             
@@ -639,7 +687,12 @@ class TafGenerator:
                     
                     d_diff_next = abs(state['wdir'] - next_state['wdir'])
                     if d_diff_next > 180: d_diff_next = 360 - d_diff_next
-                    wind_consistent = (d_diff_next < 60) and (abs(state['wspd'] - next_state['wspd']) < 10)
+                    spd_consistent = not self._is_speed_change_significant(
+                        state['wspd'], next_state['wspd'],
+                        old_gust=state['wgust'], new_gust=next_state['wgust'],
+                        old_valid_gust=state.get('valid_gust', False), new_valid_gust=next_state.get('valid_gust', False)
+                    )
+                    wind_consistent = (d_diff_next < 60) and spd_consistent
                     
                     vis_consistent = not self._check_vis_limit_change(state['vis'], next_state['vis'])
                     cloud_consistent = (state['clouds'] == next_state['clouds'])
@@ -660,6 +713,11 @@ class TafGenerator:
                     next_s = timeline[i + check_ahead]
                     
                     n_wind = (abs(next_s['wdir'] - target_state['wdir']) >= 60) 
+                    n_spd = self._is_speed_change_significant(
+                        target_state['wspd'], next_s['wspd'],
+                        old_gust=target_state['wgust'], new_gust=next_s['wgust'],
+                        old_valid_gust=target_state.get('valid_gust', False), new_valid_gust=next_s.get('valid_gust', False)
+                    )
                     n_vis = self._check_vis_limit_change(target_state['vis'], next_s['vis'])
                     n_wx = (next_s['wx'] != target_state['wx'])
                     n_cld = (next_s['clouds'] != target_state['clouds'])
@@ -668,7 +726,7 @@ class TafGenerator:
                     if target_state['is_vrb'] and next_s['is_vrb']:
                         n_wind = False
                         
-                    if n_wind or n_vis or n_cld or n_wx or n_vrb:
+                    if n_wind or n_spd or n_vis or n_cld or n_wx or n_vrb:
                         target_state = next_s
                         
                     check_ahead += 1
@@ -683,6 +741,26 @@ class TafGenerator:
                 start_str = f"{start_dt.day:02d}{start_dt.hour:02d}"
                 end_str = f"{end_dt.day:02d}{end_dt.hour:02d}"
                 
+                # Redundancy guard: after look-ahead, verify target_state
+                # is actually different from the current prevailing state.
+                target_wind_sig = self._is_speed_change_significant(
+                    curr_wspd, target_state['wspd'],
+                    old_gust=curr_wgust, new_gust=target_state['wgust'],
+                    old_valid_gust=curr_valid_gust, new_valid_gust=target_state.get('valid_gust', False)
+                )
+                target_dir_diff = abs(target_state['wdir'] - curr_wdir)
+                if target_dir_diff > 180: target_dir_diff = 360 - target_dir_diff
+                target_dir_sig = (target_dir_diff >= 60) and (target_state['wspd'] >= 5)
+                target_vrb_chg = (target_state['is_vrb'] != curr_is_vrb)
+                target_vis_chg = self._check_vis_limit_change(curr_vis, target_state['vis'])
+                target_cloud_chg = (target_state['clouds'] != curr_clouds)
+                target_wx_chg = (target_state['wx'] != curr_wx)
+
+                if not (target_wind_sig or target_dir_sig or target_vrb_chg or target_vis_chg or target_cloud_chg or target_wx_chg):
+                    # Target state is effectively the same as prevailing — skip
+                    i += (1 + steps_to_skip)
+                    continue
+
                 out_parts = [f"BECMG {start_str}/{end_str}"]
                 
                 out_parts.append(self._format_wind(target_state['wdir'], target_state['wspd'], target_state['wgust'], is_vrb=target_state['is_vrb'], valid_gust=target_state.get('valid_gust', False)))
@@ -702,6 +780,7 @@ class TafGenerator:
                 
                 curr_wdir = target_state['wdir']
                 curr_wspd = target_state['wspd']
+                curr_wgust = target_state['wgust']
                 curr_vis = target_state['vis']
                 curr_clouds = target_state['clouds']
                 curr_wx = target_state['wx']
@@ -737,6 +816,7 @@ class TafGenerator:
         curr_wx = init_wx
         curr_wdir = init_wind_obj['d']
         curr_wspd = init_wind_obj['s']
+        curr_wgust = init_wind_obj.get('g', 0)
         curr_is_vrb = init_wind_obj.get('is_vrb', False)
         curr_valid_gust = init_wind_obj.get('valid_gust', False)
         
@@ -747,8 +827,12 @@ class TafGenerator:
             diff_dir = abs(state['wdir'] - curr_wdir)
             if diff_dir > 180: diff_dir = 360 - diff_dir
             
-            dir_significant = (diff_dir >= 60)
-            spd_significant = (abs(state['wspd'] - curr_wspd) >= 10)
+            dir_significant = (diff_dir >= 60) and (state['wspd'] >= 5)
+            spd_significant = self._is_speed_change_significant(
+                curr_wspd, state['wspd'],
+                old_gust=curr_wgust, new_gust=state['wgust'],
+                old_valid_gust=curr_valid_gust, new_valid_gust=state.get('valid_gust', False)
+            )
             vrb_chg = (state['is_vrb'] != curr_is_vrb)
             
             if curr_is_vrb and state['is_vrb']:
@@ -766,6 +850,11 @@ class TafGenerator:
                 while check_ahead <= 2 and (i + check_ahead) < len(timeline):
                     next_s = timeline[i + check_ahead]
                     n_wind = (abs(next_s['wdir'] - target_state['wdir']) >= 60) 
+                    n_spd = self._is_speed_change_significant(
+                        target_state['wspd'], next_s['wspd'],
+                        old_gust=target_state['wgust'], new_gust=next_s['wgust'],
+                        old_valid_gust=target_state.get('valid_gust', False), new_valid_gust=next_s.get('valid_gust', False)
+                    )
                     n_vis = self._check_vis_limit_change(target_state['vis'], next_s['vis'])
                     n_cld = (next_s['clouds'] != target_state['clouds'])
                     n_vrb = (next_s['is_vrb'] != target_state['is_vrb'])
@@ -773,7 +862,7 @@ class TafGenerator:
                     if target_state['is_vrb'] and next_s['is_vrb']:
                         n_wind = False
                         
-                    if n_wind or n_vis or n_cld or n_vrb: target_state = next_s
+                    if n_wind or n_spd or n_vis or n_cld or n_vrb: target_state = next_s
                     check_ahead += 1
                 
                 curr_vis = target_state['vis']
@@ -781,6 +870,7 @@ class TafGenerator:
                 curr_wx = target_state['wx']
                 curr_wdir = target_state['wdir']
                 curr_wspd = target_state['wspd']
+                curr_wgust = target_state['wgust']
                 curr_is_vrb = target_state['is_vrb']
                 curr_valid_gust = target_state.get('valid_gust', False)
                 
@@ -860,7 +950,7 @@ class TafGenerator:
         taf_body = f"{init_wind} {base['vis']} {base['wx']} {base['clouds']}".strip()
         taf_body = " ".join(taf_body.split())
         
-        init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'is_vrb': base['is_vrb'], 'valid_gust': base.get('valid_gust', False)}
+        init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'g': base['wgust'], 'is_vrb': base['is_vrb'], 'valid_gust': base.get('valid_gust', False)}
         
         prevailing_plan = self._build_prevailing_plan(timeline, base['vis'], base['clouds'], base['wx'], init_wind_obj)
         
@@ -894,7 +984,7 @@ class TafGenerator:
         taf_body = f"{init_wind} {base['vis']} {base['wx']} {base['clouds']}".strip()
         taf_body = " ".join(taf_body.split())
         
-        init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'is_vrb': base['is_vrb'], 'valid_gust': base.get('valid_gust', False)}
+        init_wind_obj = {'d': base['wdir'], 's': base['wspd'], 'g': base['wgust'], 'is_vrb': base['is_vrb'], 'valid_gust': base.get('valid_gust', False)}
         
         prevailing_plan = self._build_prevailing_plan(timeline, base['vis'], base['clouds'], base['wx'], init_wind_obj)
         
