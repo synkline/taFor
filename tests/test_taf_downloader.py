@@ -5,14 +5,19 @@ import unittest
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import parse_qs
+from urllib.request import Request
 
 from taf_downloader import (
+    ConfiguredHostRedirectHandler,
     DownloadError,
+    TemporaryDownloadError,
     TafDownloader,
     build_combined_pdf,
     parse_tafs,
     resolve_issue_time,
     save_unique_pdf,
+    validate_base_url,
+    validate_pdf_bytes,
 )
 
 
@@ -32,6 +37,7 @@ RESULT_HTML = (
     '<div id="short-taf">' + SHORT_TAF + '</div>'
     '</body></html>'
 ).encode("utf-8")
+TEST_NOW = datetime.datetime(2026, 10, 12, 17, 30, tzinfo=datetime.timezone.utc)
 
 
 class FakeHeaders(dict):
@@ -76,7 +82,10 @@ class FakeOpener:
 def successful_responses(source_status="downloaded"):
     return [
         FakeResponse(FORM_HTML),
-        FakeResponse(RESULT_HTML, {"X-AutoTAF-IMD-Source": source_status}),
+        FakeResponse(RESULT_HTML, {
+            "X-AutoTAF-IMD-Source": source_status,
+            "X-AutoTAF-IMD-Issue-UTC": "2026-10-12T12:00:00Z",
+        }),
     ]
 
 
@@ -90,7 +99,9 @@ class TafDownloaderTests(unittest.TestCase):
 
     def test_extracts_both_tafs_and_hidden_form_fields(self):
         opener = FakeOpener(successful_responses())
-        downloader = TafDownloader(opener=opener, logger=self.logger, sleep_fn=lambda _: None)
+        downloader = TafDownloader(base_url="http://127.0.0.1:5000", opener=opener,
+                                   logger=self.logger, sleep_fn=lambda _: None,
+                                   now_fn=lambda: TEST_NOW)
 
         long_taf, short_taf = downloader._generate_from_endpoint()
 
@@ -107,7 +118,9 @@ class TafDownloaderTests(unittest.TestCase):
     def test_retries_temporary_network_errors(self):
         opener = FakeOpener([URLError("temporary offline")] + successful_responses())
         delays = []
-        downloader = TafDownloader(opener=opener, logger=self.logger, sleep_fn=delays.append)
+        downloader = TafDownloader(base_url="http://127.0.0.1:5000", opener=opener,
+                                   logger=self.logger, sleep_fn=delays.append,
+                                   now_fn=lambda: TEST_NOW)
 
         self.assertEqual(downloader._generate_with_retries(), (LONG_TAF, SHORT_TAF))
         self.assertEqual(delays, [5])
@@ -117,8 +130,8 @@ class TafDownloaderTests(unittest.TestCase):
         opener = FakeOpener(successful_responses("cache_fallback"))
         with self.temp_directory() as temp_dir:
             downloader = TafDownloader(
-                output_dir=temp_dir, attempts=1, opener=opener,
-                logger=self.logger, sleep_fn=lambda _: None,
+                base_url="http://127.0.0.1:5000", output_dir=temp_dir, attempts=1, opener=opener,
+                logger=self.logger, sleep_fn=lambda _: None, now_fn=lambda: TEST_NOW,
             )
             with self.assertRaisesRegex(DownloadError, "cached IMD data"):
                 downloader.download_once()
@@ -128,8 +141,8 @@ class TafDownloaderTests(unittest.TestCase):
         opener = FakeOpener(successful_responses())
         with self.temp_directory() as temp_dir:
             downloader = TafDownloader(
-                output_dir=temp_dir, opener=opener,
-                logger=self.logger, sleep_fn=lambda _: None,
+                base_url="http://127.0.0.1:5000", output_dir=temp_dir, opener=opener,
+                logger=self.logger, sleep_fn=lambda _: None, now_fn=lambda: TEST_NOW,
             )
             path = downloader.download_once()
 
@@ -142,6 +155,7 @@ class TafDownloaderTests(unittest.TestCase):
 
     def test_saves_valid_combined_pdf_and_never_overwrites(self):
         pdf = build_combined_pdf(LONG_TAF, SHORT_TAF)
+        self.assertTrue(validate_pdf_bytes(pdf, LONG_TAF, SHORT_TAF))
         self.assertTrue(pdf.startswith(b"%PDF-1.4"))
         self.assertIn(b"/BaseFont /Courier", pdf)
         self.assertIn(b"Long TAF:", pdf)
@@ -161,7 +175,9 @@ class TafDownloaderTests(unittest.TestCase):
     def test_falls_back_to_generation_timestamp_in_filename(self):
         generated_at = datetime.datetime(2026, 10, 12, 17, 30, 45, tzinfo=datetime.timezone.utc)
         with self.temp_directory() as temp_dir:
-            path = save_unique_pdf(temp_dir, b"%PDF-test", "No issue code", generated_at)
+            long_taf = "TAF VABB issue time unavailable"
+            pdf = build_combined_pdf(long_taf, "TAF VABB short issue time unavailable")
+            path = save_unique_pdf(temp_dir, pdf, long_taf, generated_at)
             self.assertEqual(path.name, "VABB_Combined_TAF_GENERATED_20261012_173045Z.pdf")
 
     def test_resolves_issue_time_across_month_boundary(self):
@@ -174,6 +190,53 @@ class TafDownloaderTests(unittest.TestCase):
         _, long_taf, short_taf, error = parse_tafs(html)
         self.assertEqual((long_taf, short_taf), ("", ""))
         self.assertEqual(error, "Error Ogimet Error: Network error")
+
+    def test_rejects_stale_model_issue_even_when_server_says_downloaded(self):
+        responses = successful_responses()
+        responses[1] = FakeResponse(RESULT_HTML, {
+            "X-AutoTAF-IMD-Source": "downloaded",
+            "X-AutoTAF-IMD-Issue-UTC": "2026-10-11T00:00:00Z",
+        })
+        downloader = TafDownloader(
+            base_url="http://127.0.0.1:5000", attempts=1,
+            opener=FakeOpener(responses), logger=self.logger,
+            now_fn=lambda: TEST_NOW, sleep_fn=lambda _: None,
+        )
+        with self.assertRaisesRegex(TemporaryDownloadError, "hours old"):
+            downloader._generate_with_retries()
+
+    def test_blocks_requests_and_redirects_outside_configured_origin(self):
+        downloader = TafDownloader(base_url="http://autotaf.example", opener=FakeOpener([]), logger=self.logger)
+        with self.assertRaisesRegex(DownloadError, "left the configured"):
+            downloader._open(Request("http://other.example/"))
+
+        redirect_handler = ConfiguredHostRedirectHandler("http://autotaf.example")
+        with self.assertRaisesRegex(DownloadError, "redirected outside"):
+            redirect_handler.redirect_request(
+                Request("http://autotaf.example/"), None, 302, "Found", {},
+                "http://attacker.example/generate",
+            )
+        with self.assertRaisesRegex(DownloadError, "invalid redirect"):
+            redirect_handler.redirect_request(
+                Request("http://autotaf.example/"), None, 302, "Found", {},
+                "http://user:secret@autotaf.example/generate",
+            )
+
+    def test_rejects_credentials_query_and_invalid_scheme_in_base_url(self):
+        for url in (
+            "http://user:password@autotaf.example",
+            "http://autotaf.example/?token=secret",
+            "ftp://autotaf.example",
+        ):
+            with self.subTest(url=url), self.assertRaises(DownloadError):
+                validate_base_url(url)
+
+    def test_rejects_corrupt_pdf_before_creating_final_file(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as temp_dir:
+            with self.assertRaises(DownloadError):
+                save_unique_pdf(temp_dir, b"%PDF-broken", LONG_TAF, TEST_NOW)
+            self.assertEqual(list(Path(temp_dir).glob("*.pdf")), [])
+            self.assertEqual(list(Path(temp_dir).glob(".autotaf-*.tmp")), [])
 
 
 if __name__ == "__main__":

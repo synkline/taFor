@@ -1,12 +1,16 @@
 from flask import Flask, make_response, render_template, request, redirect, url_for, flash
 import os
+import secrets
 from scraper import IMDScraper, OgimetScraper
 from taf_generator import TafGenerator
 from cleanup import run_automated_cleanup
 import threading
 
 app = Flask(__name__)
-app.secret_key = 'super_secret_taf_key'  
+configured_secret = os.environ.get('FLASK_SECRET_KEY')
+if os.environ.get('AUTO_TAF_ENV', 'development').lower() == 'production' and not configured_secret:
+    raise RuntimeError('FLASK_SECRET_KEY must be configured in production.')
+app.secret_key = configured_secret or secrets.token_urlsafe(32)
 
 @app.route('/', methods=['GET'])
 def index():
@@ -57,6 +61,8 @@ def generate():
                          debug_forms=debug_forms,
                          last_station=station))
     response.headers['X-AutoTAF-IMD-Source'] = imd_data.get('_imd_download_status', 'unknown')
+    if imd_data.get('_imd_model_issue_utc'):
+        response.headers['X-AutoTAF-IMD-Issue-UTC'] = imd_data['_imd_model_issue_utc']
     return response
 
 if __name__ == '__main__':

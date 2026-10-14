@@ -5,6 +5,7 @@ import datetime
 import time
 import random
 import os
+import tempfile
 
 class OgimetScraper:
     def __init__(self):
@@ -159,19 +160,34 @@ class IMDScraper:
         if "error" not in download_result:
              print(f"[IMD] Successfully downloaded latest data for {station}.")
              download_status = "downloaded"
+             downloaded_path = download_result.get("path")
+             data = self._read_data_file(downloaded_path) if downloaded_path else {
+                 "error": "The downloaded IMD file path was not returned."
+             }
         else:
              print(f"[IMD] Online download failed: {download_result['error']}")
              print("[IMD] Attempting to read from local cache...")
              download_status = "cache_fallback"
+             downloaded_path = None
+             data = self.read_from_cache(station)
 
-        cached_data = self.read_from_cache(station)
-        if "error" not in cached_data:
+        if "error" not in data:
             # The web layer uses this metadata to avoid treating a cache fallback
             # as a fresh forecast. The generator ignores these extra keys.
-            cached_data["_imd_download_status"] = download_status
+            data["_imd_download_status"] = download_status
             if download_status == "downloaded":
-                cached_data["_imd_downloaded_file"] = os.path.basename(download_result.get("path", ""))
-        return cached_data
+                filename = os.path.basename(downloaded_path)
+                data["_imd_downloaded_file"] = filename
+                issue_match = re.search(r"_(\d{8})_(\d{2})UTC\.txt$", filename, re.IGNORECASE)
+                if issue_match:
+                    try:
+                        issue_time = datetime.datetime.strptime(
+                            issue_match.group(1) + issue_match.group(2), "%Y%m%d%H"
+                        ).replace(tzinfo=datetime.timezone.utc)
+                        data["_imd_model_issue_utc"] = issue_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    except ValueError:
+                        pass
+        return data
 
     def download_data(self, station_code):
         """
@@ -301,12 +317,25 @@ class IMDScraper:
                     
                 versioned_path = os.path.join(station_dir, versioned_filename)
                 
-                if not os.path.exists(versioned_path):
-                    with open(versioned_path, "wb") as f:
-                         f.write(content if isinstance(content, bytes) else content.encode('utf-8'))
-                    print(f"[IMD] Versioned copy saved: {versioned_path}")
-                else:
-                    print(f"[IMD] Versioned copy already exists: {versioned_filename}")
+                content_bytes = content if isinstance(content, bytes) else content.encode('utf-8')
+                fd, temporary_name = tempfile.mkstemp(
+                    prefix="." + versioned_filename + ".",
+                    suffix=".tmp",
+                    dir=station_dir,
+                )
+                temporary_path = temporary_name
+                try:
+                    with os.fdopen(fd, "wb") as cache_file:
+                        cache_file.write(content_bytes)
+                        cache_file.flush()
+                        os.fsync(cache_file.fileno())
+                    os.replace(temporary_path, versioned_path)
+                finally:
+                    try:
+                        os.unlink(temporary_path)
+                    except FileNotFoundError:
+                        pass
+                print(f"[IMD] Fresh versioned file saved: {versioned_path}")
             else:
                 print("[IMD] Could not find 'BASED ON' timestamp for versioning.")
                 return None
@@ -371,19 +400,20 @@ class IMDScraper:
         files.sort(reverse=True)
         target_file = files[0]
              
+        print(f"[IMD] Reading from cache: {os.path.basename(target_file)}")
+        return self._read_data_file(target_file)
+
+    def _read_data_file(self, target_file):
         try:
-            print(f"[IMD] Reading from cache: {os.path.basename(target_file)}")
             with open(target_file, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
 
             if "<html>" in content.lower() or "<table" in content.lower():
                  soup = BeautifulSoup(content, 'lxml')
                  return self._parse_data_table(soup)
-            else:
-                                                                                  
-                 return self._parse_text_response(content)
+            return self._parse_text_response(content)
         except Exception as e:
-            return {"error": f"Failed to read cache: {e}"}
+            return {"error": f"Failed to read IMD data file: {e}"}
 
     def _parse_text_response(self, text):
                                                                      

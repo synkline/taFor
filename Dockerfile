@@ -5,6 +5,7 @@ WORKDIR /app
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV AUTO_TAF_ENV=production
 
 # Install dependencies
 COPY requirements.txt .
