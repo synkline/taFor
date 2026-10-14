@@ -158,11 +158,20 @@ class IMDScraper:
         download_result = self.download_data(station)
         if "error" not in download_result:
              print(f"[IMD] Successfully downloaded latest data for {station}.")
+             download_status = "downloaded"
         else:
              print(f"[IMD] Online download failed: {download_result['error']}")
              print("[IMD] Attempting to read from local cache...")
+             download_status = "cache_fallback"
 
-        return self.read_from_cache(station)
+        cached_data = self.read_from_cache(station)
+        if "error" not in cached_data:
+            # The web layer uses this metadata to avoid treating a cache fallback
+            # as a fresh forecast. The generator ignores these extra keys.
+            cached_data["_imd_download_status"] = download_status
+            if download_status == "downloaded":
+                cached_data["_imd_downloaded_file"] = os.path.basename(download_result.get("path", ""))
+        return cached_data
 
     def download_data(self, station_code):
         """

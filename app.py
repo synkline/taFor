@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
+from flask import Flask, make_response, render_template, request, redirect, url_for, flash
 import os
 from scraper import IMDScraper, OgimetScraper
 from taf_generator import TafGenerator
@@ -50,12 +50,14 @@ def generate():
         except Exception as e:
             error_msg = f"Generation Error: {str(e)}"
 
-    return render_template('index.html', 
-                         long_taf=long_taf, 
-                         short_taf=short_taf, 
-                         error=error_msg, 
+    response = make_response(render_template('index.html',
+                         long_taf=long_taf,
+                         short_taf=short_taf,
+                         error=error_msg,
                          debug_forms=debug_forms,
-                         last_station=station)
+                         last_station=station))
+    response.headers['X-AutoTAF-IMD-Source'] = imd_data.get('_imd_download_status', 'unknown')
+    return response
 
 if __name__ == '__main__':
                                                                  
